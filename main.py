@@ -319,7 +319,7 @@ if __name__ == "__main__":
                 except asyncio.TimeoutError:
                     client.print("Shutdown timed out.")
                     try:
-                        if client._session is not None:
+                        if client._session is not None and not client._jar_load_failed:
                             from constants import COOKIES_PATH
 
                             from auth_session import save_jar

@@ -589,6 +589,7 @@ class Twitch:
         self.wanted_games: list[Game] = []
         self.inventory: list[DropsCampaign] = []
         self._drops: dict[str, TimedDrop] = {}
+        self._jar_load_failed: bool = False
         self._campaigns: dict[str, DropsCampaign] = {}
         self._mnt_triggers: deque[datetime] = deque()
         # NOTE: GQL is pretty volatile and breaks everything if one runs into their rate limit.
@@ -627,6 +628,9 @@ class Twitch:
             # if loading in the cookies file ends up in an error, just ignore it
             # clear the jar, just in case
             cookie_jar.clear()
+            # ...but never write the empty jar over the file we could not read
+            self._jar_load_failed = True
+            logger.warning("Saved session could not be loaded; %s will not be overwritten", COOKIES_PATH)
         # create timeouts
         # connection quality mulitiplier determines the magnitude of timeouts
         connection_quality = self.settings.connection_quality
@@ -667,7 +671,13 @@ class Twitch:
             for cookie_key, cookie in list(cookie_jar._cookies.items()):
                 if not cookie:
                     del cookie_jar._cookies[cookie_key]
-            save_jar(cookie_jar, COOKIES_PATH)
+            if self._jar_load_failed:
+                logger.warning("Not saving cookies: the saved session failed to load")
+            else:
+                try:
+                    save_jar(cookie_jar, COOKIES_PATH)
+                except OSError as exc:
+                    logger.error("Failed to save cookies: %s", exc.strerror or type(exc).__name__)
             await self._session.close()
             self._session = None
         self._drops.clear()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import io
 import os
 import stat
@@ -69,7 +71,7 @@ class SessionFileTests(unittest.TestCase):
             self.assertEqual(self.path.read_bytes(), saved)
             self.assertEqual(list(self.path.parent.glob(".cookies.jar.*")), [])
 
-    def test_archives_rotate_and_prune_five_newest(self) -> None:
+    def test_archives_keep_every_distinct_session(self) -> None:
         for number in range(8):
             auth_session.write_session(f"secret-{number}", "7", ClientType.ANDROID_APP, self.path)
             backup = self.path.with_name("cookies.jar.bak")
@@ -77,12 +79,38 @@ class SessionFileTests(unittest.TestCase):
                 timestamp = 1788220800 + number * 60
                 os.utime(backup, (timestamp, timestamp))
             auth_session.backup_session(self.path)
+        # backing up the same session again must not create a duplicate archive
+        auth_session.backup_session(self.path)
         archives = sorted(self.path.parent.glob("cookies.jar.bak.[0-9]*"))
-        self.assertEqual(len(archives), 5)
-        self.assertEqual(auth_session.archive_count(self.path), 5)
+        self.assertEqual(auth_session.archive_count(self.path), 7)
         self.assertEqual([auth_session.read_token(archive)[0] for archive in archives],
-                         [f"secret-{number}" for number in range(2, 7)])
+                         [f"secret-{number}" for number in range(7)])
         self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "secret-7")
+
+    def test_save_jar_backs_up_before_dropping_the_token(self) -> None:
+        import aiohttp
+        auth_session.write_session("only-copy", "1", ClientType.ANDROID_APP, self.path)
+
+        async def save_empty() -> None:
+            auth_session.save_jar(aiohttp.CookieJar(), self.path)
+
+        asyncio.run(save_empty())
+        self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "only-copy")
+        auth_session.write_session("only-copy", "1", ClientType.ANDROID_APP, self.path)
+        with patch.object(auth_session, "_copy_atomic", side_effect=OSError(28, "No space left")):
+            with self.assertRaises(OSError):
+                asyncio.run(save_empty())
+        self.assertEqual(auth_session.read_token(self.path)[0], "only-copy")
+
+    def test_second_restore_keeps_the_first_previous_session(self) -> None:
+        auth_session.write_session("backup", "1", ClientType.ANDROID_APP, self.path)
+        auth_session.backup_session(self.path)
+        auth_session.write_session("imported", "1", ClientType.ANDROID_APP, self.path)
+        auth_session.restore_session(self.path)
+        auth_session.write_session("third", "1", ClientType.ANDROID_APP, self.path)
+        auth_session.restore_session(self.path)
+        kept = {auth_session.read_token(item)[0] for item in self.path.parent.glob("cookies.jar.bak*")}
+        self.assertTrue({"backup", "imported", "third"} <= kept)
 
     def test_unreadable_backup_is_archived_not_discarded(self) -> None:
         auth_session.write_session("valid", "1", ClientType.ANDROID_APP, self.path)

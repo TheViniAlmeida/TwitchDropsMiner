@@ -38,8 +38,25 @@ def _copy_atomic(source: Path, destination: Path) -> Path:
             os.unlink(temporary)
     return destination
 
+
+_TOKEN_HOSTS = (ClientType.ANDROID_APP.CLIENT_URL.host, ClientType.MOBILE_WEB.CLIENT_URL.host)
+
+
+def _jar_token(jar: aiohttp.CookieJar) -> str | None:
+    for host in _TOKEN_HOSTS:
+        if host is not None:
+            token = jar.filter_cookies(URL.build(scheme="https", host=host)).get("auth-token")
+            if token is not None and token.value:
+                return token.value
+    return None
+
+
 def save_jar(jar: aiohttp.CookieJar, path: Path = COOKIES_PATH) -> None:
+    """Atomically save the jar; never drop a saved session without a backup of it."""
     path = Path(path)
+    if path.is_file() and _jar_token(jar) is None and _file_token(path) is not None:
+        # raises OSError when the backup cannot be written: the saved file stays untouched
+        backup_session(path)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         try:
@@ -54,15 +71,43 @@ def save_jar(jar: aiohttp.CookieJar, path: Path = COOKIES_PATH) -> None:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
-def _same_token(source: Path, backup: Path) -> bool:
+
+def _file_token(path: Path) -> str | None:
     try:
-        return read_token(source)[0] == read_token(backup)[0]
+        return read_token(path)[0]
     except Exception:
-        return False
+        return None
+
+
+def _same_token(source: Path, backup: Path) -> bool:
+    token = _file_token(source)
+    return token is not None and token == _file_token(backup)
+
 
 def _archives(path: Path) -> list[Path]:
     return sorted(path.parent.glob(path.name + ".bak.[0-9]*"),
                   key=lambda archive: archive.stat().st_mtime, reverse=True)
+
+
+def _archive(source: Path, path: Path) -> None:
+    """Move source into a timestamped archive, unless that session is already archived.
+
+    Archives are deduplicated by token and never pruned: each one is a distinct session.
+    """
+    token = _file_token(source)
+    if token is not None and any(_file_token(archive) == token for archive in _archives(path)):
+        source.unlink()
+        return
+    base = path.with_name(path.name + ".bak")
+    timestamp = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc).strftime("%Y%m%d-%H%M%S")
+    archive = base.with_name(f"{base.name}.{timestamp}")
+    suffix = 1
+    while archive.exists():
+        archive = base.with_name(f"{base.name}.{timestamp}.{suffix}")
+        suffix += 1
+    os.replace(source, archive)
+    os.chmod(archive, 0o600)
+
 
 def archive_count(path: Path = COOKIES_PATH) -> int:
     return len(_archives(Path(path)))
@@ -74,18 +119,8 @@ def backup_session(path: Path = COOKIES_PATH) -> Path | None:
         return None
     backup = path.with_name(path.name + ".bak")
     if backup.exists() and not _same_token(path, backup):
-        timestamp = datetime.fromtimestamp(backup.stat().st_mtime, timezone.utc).strftime("%Y%m%d-%H%M%S")
-        archive = backup.with_name(f"{backup.name}.{timestamp}")
-        suffix = 1
-        while archive.exists():
-            archive = backup.with_name(f"{backup.name}.{timestamp}.{suffix}")
-            suffix += 1
-        os.replace(backup, archive)
-        os.chmod(archive, 0o600)
-    result = _copy_atomic(path, backup)
-    for archive in _archives(path)[5:]:
-        archive.unlink()
-    return result
+        _archive(backup, path)
+    return _copy_atomic(path, backup)
 
 
 def ensure_backup(path: Path = COOKIES_PATH) -> Path | None:
@@ -110,6 +145,9 @@ def restore_session(path: Path = COOKIES_PATH) -> tuple[Path, Path]:
     if not backup.is_file() or backup.stat().st_size == 0:
         raise ValueError("no saved session backup")
     previous = path.with_name(path.name + ".bak.prev")
+    if previous.is_file() and not _same_token(path, previous) and not _same_token(backup, previous):
+        # a second restore must not lose the session kept by the first one
+        _archive(previous, path)
     backup_previous(path)
     _copy_atomic(backup, path)
     return path, previous
