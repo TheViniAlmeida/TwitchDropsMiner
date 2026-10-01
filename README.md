@@ -100,8 +100,9 @@ From another terminal, `main.py cli ctl status` queries the running miner throug
 control channel; `main.py cli ctl help` lists the available remote console commands.
 For scripts, `main.py cli ctl --json <command>` prints the result of a read-only command
 (`status`, `channels`, `inventory [all]`, `games [--names]`, `campaigns`, `drops <name>`,
-`game <name>`, `progress`, `settings`, `get [key]`, `priority`, `exclude`, `filters`) as JSON on
-stdout, with errors on stderr and exit code 1. Commands that change anything are refused in this mode.
+`game <name>`, `progress`, `settings`, `get [key]`, `priority`, `exclude`) as JSON on
+stdout, with errors on stderr and exit code 1. Commands that change anything are refused in this mode,
+and `--json` must come before the command.
 Authentication failures are limited per client IP, so clients behind one reverse proxy share
 the limit for invalid tokens while valid tokens remain usable. Use TLS at the proxy for remote access.
 

@@ -8,8 +8,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import asdict
-
 from cli import CLIManager
 from cli_actions import CampaignFilters
 from cli_commands import CommandError, json_command_allowed
@@ -29,8 +27,6 @@ class CommandDataTests(unittest.TestCase):
         self.assertEqual(self.manager.command_data("status"), {"state": "IDLE", "current_drop": None})
         self.manager.actions.game = lambda name: {"name": name}
         self.assertEqual(self.manager.command_data("game Two Words"), {"name": "Two Words"})
-        self.manager._campaign_filters = CampaignFilters()
-        self.assertEqual(self.manager.command_data("filters"), asdict(CampaignFilters()))
 
     def test_changes_and_unknown_commands_are_refused(self) -> None:
         for line in ("logout", "switch someone", "set language English", "priority add Game",
@@ -108,6 +104,21 @@ class ControlJSONTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("commands:" in line for line in output))
 
 
+class FiltersCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_showing_filters_keeps_following_the_defaults(self) -> None:
+        manager = CLIManager(FakeTwitch())
+        try:
+            manager.actions.default_filters = lambda: CampaignFilters(not_linked=False)
+            output: list[str] = []
+            self.assertTrue(await manager.dispatch_command("filters", writer=output.append))
+            self.assertIsNone(manager._campaign_filters)
+            self.assertIn("not_linked = off", output)
+            self.assertTrue(await manager.dispatch_command("filters not_linked=on", writer=output.append))
+            self.assertTrue(manager._campaign_filters.not_linked)
+        finally:
+            manager.close_window()
+
+
 class OlderMinerTests(unittest.IsolatedAsyncioTestCase):
     async def test_text_reply_to_json_request_is_an_error(self) -> None:
         if sys.platform == "win32":
@@ -137,11 +148,11 @@ class OlderMinerTests(unittest.IsolatedAsyncioTestCase):
 class JSONAllowListTests(unittest.TestCase):
     def test_only_reads_are_allowed(self) -> None:
         for words in (["status"], ["STATUS"], ["priority"], ["priority", "LIST"], ["exclude", "list"],
-                      ["filters"], ["get", "language"], ["campaigns", "--all"], ["drops", "Game"]):
+                      ["get", "language"], ["campaigns", "--all"], ["drops", "Game"]):
             with self.subTest(words=words):
                 self.assertTrue(json_command_allowed(words))
         for words in ([], ["logout"], ["switch", "x"], ["set", "language", "English"], ["reload"],
-                      ["priority", "add", "Game"], ["exclude", "remove", "Game"], ["filters", "all=on"],
+                      ["priority", "add", "Game"], ["exclude", "remove", "Game"], ["filters"], ["filters", "all=on"],
                       ["watch"], ["quit"], ["help"]):
             with self.subTest(words=words):
                 self.assertFalse(json_command_allowed(words))
@@ -157,6 +168,16 @@ class CtlArgumentTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("--json needs a command", result.stderr)
+
+    def test_late_json_flag_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "main.py", "cli", "ctl", "status", "--json"],
+                cwd=Path(__file__).resolve().parents[1], env={**os.environ, "TDM_DATA_DIR": directory},
+                capture_output=True, text=True, timeout=8, stdin=subprocess.DEVNULL,
+            )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("put --json before the command", result.stderr)
 
     def test_change_is_refused_before_contacting_the_miner(self) -> None:
         # exit 2, not 3 (no miner): an older miner never gets the chance to run it as text

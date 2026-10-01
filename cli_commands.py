@@ -67,7 +67,7 @@ def _remote_command(args: Any) -> list[str]:
 
 JSON_COMMANDS = (
     "status, channels, inventory [all], games [--names], campaigns, drops <name>, game <name>, "
-    "progress, settings, get [key], priority, exclude, filters"
+    "progress, settings, get [key], priority, exclude"
 )
 _JSON_READS = {"status", "channels", "inventory", "games", "campaigns", "drops", "game",
                "progress", "settings", "get"}
@@ -80,8 +80,7 @@ def json_command_allowed(words: list[str]) -> bool:
     command, values = words[0].casefold(), words[1:]
     if command in ("priority", "exclude"):
         return [value.casefold() for value in values] in ([], ["list"])
-    if command == "filters":
-        return not values
+    # "filters" stays out: an older miner pins the session filters even without arguments
     return command in _JSON_READS
 
 
@@ -108,6 +107,10 @@ def run_control_client(args: Any) -> int:
         return input("Back up and remove saved login? [y/N] ").casefold() == "y"
 
     json_output = getattr(args, "json", False)
+    if "--json" in args.words:
+        # everything after the command is sent as is, so a late flag would be silently ignored
+        print("put --json before the command, e.g. cli ctl --json status", file=sys.stderr)
+        return 2
     if json_output and not args.words:
         print("--json needs a command, e.g. cli ctl --json status", file=sys.stderr)
         return 2

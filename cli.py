@@ -12,7 +12,7 @@ from contextvars import ContextVar
 from collections import OrderedDict, deque
 from collections import abc
 from contextlib import suppress
-from dataclasses import asdict, fields, replace
+from dataclasses import fields, replace
 from datetime import datetime
 from time import monotonic
 from typing import Any, TYPE_CHECKING, Callable, TypeVar
@@ -794,7 +794,6 @@ class CLIManager:
             "games": self.actions.games, "progress": self.actions.progress,
             "settings": self.actions.settings_schema,
             "get": lambda: self.actions.settings(include_gui_only=True),
-            "filters": lambda: asdict(self._current_filters()),
         }
         if command in simple and not values:
             return simple[command]()
@@ -875,9 +874,12 @@ class CLIManager:
             task.cancel()
 
     def _command_filters(self, values: list[str]) -> None:
-        self._campaign_filters = replace(self._current_filters(), **self._filter_changes(values))
+        if values:
+            self._campaign_filters = replace(self._current_filters(), **self._filter_changes(values))
+        # showing them keeps following the defaults, which change with the priority mode
+        current = self._current_filters()
         for field in fields(CampaignFilters):
-            self.print(f"{field.name} = {'on' if getattr(self._campaign_filters, field.name) else 'off'}")
+            self.print(f"{field.name} = {'on' if getattr(current, field.name) else 'off'}")
 
     def _command_settings(self) -> None:
         self.print("key | type | value | choices")
