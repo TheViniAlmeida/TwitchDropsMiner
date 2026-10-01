@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from yarl import URL
@@ -169,9 +169,15 @@ class Actions:
     def game_names(self) -> list[str]:
         return sorted((game.name for game in self.manager._games), key=str.casefold)
 
+    def default_filters(self) -> CampaignFilters:
+        # the GUI starts with unlinked campaigns shown in PRIORITY_ONLY mode
+        return CampaignFilters(
+            not_linked=self.twitch.settings.priority_mode is PriorityMode.PRIORITY_ONLY
+        )
+
     def _filters(self, filters: CampaignFilters | dict[str, bool] | None) -> CampaignFilters:
         if filters is None:
-            return CampaignFilters()
+            return self.default_filters()
         if isinstance(filters, CampaignFilters):
             return filters
         if is_dataclass(filters) and not isinstance(filters, type):
@@ -181,7 +187,7 @@ class Actions:
         allowed = {field.name for field in fields(CampaignFilters)}
         if any(key not in allowed or not isinstance(value, bool) for key, value in filters.items()):
             raise ActionError("invalid campaign filter")
-        return CampaignFilters(**filters)
+        return replace(self.default_filters(), **filters)
 
     @staticmethod
     def _safe_url(value: Any, *, keep_query: bool = False) -> str | None:

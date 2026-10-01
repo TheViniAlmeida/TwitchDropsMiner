@@ -7,6 +7,7 @@ const filterNames = ['not_linked', 'upcoming', 'expired', 'excluded', 'finished'
 // same initial state as the GUI inventory filters
 const filterState = Object.fromEntries(filterNames.map((name) => [name, name === 'upcoming']));
 const cache = new Map();
+let filtersChosen = false;
 let auth = false;
 let token = '';
 let readonly = false;
@@ -77,6 +78,16 @@ function image(url, label) {
   picture.addEventListener('error', () => picture.replaceWith(el('span', { class: 'placeholder', text: '✦', attrs: { 'aria-label': 'Image unavailable' } })));
   picture.src = url;
   return picture;
+}
+
+// every state update (HTTP or WebSocket) goes through here
+function setState(next) {
+  state = next;
+  if (!filtersChosen && state.default_filters) {
+    // same initial filters as the GUI until the viewer picks their own
+    for (const name of filterNames) if (typeof state.default_filters[name] === 'boolean') filterState[name] = state.default_filters[name];
+  }
+  readonly = Boolean(state.readonly);
 }
 
 function bar(progress) {
@@ -207,8 +218,7 @@ function connect() {
     try { data = JSON.parse(event.data); } catch { return; }
     if (data.type === 'state') {
       const { type, ...nextState } = data;
-      state = nextState;
-      readonly = Boolean(state.readonly);
+      setState(nextState);
       $('miner-state').textContent = state.state || 'Unknown';
       $('readonly-badge').hidden = !readonly;
       renderPage();
@@ -398,6 +408,7 @@ async function inventory() {
     input.checked = Boolean(filterState[name]);
     input.addEventListener('change', () => {
       filterState[name] = input.checked;
+      filtersChosen = true;
       persist(localStorage, 'dashboardFilters', JSON.stringify(filterState));
       run(() => renderPage());
     });
@@ -522,7 +533,11 @@ async function settingsPage() {
     field.append(el('span', { text: key.replaceAll('_', ' ') }), input);
     entry.append(field);
     if (!readonly) {
-      const save = () => update('settings', '/api/settings', { key, value: definition.type === 'boolean' ? String(input.checked) : input.value });
+      const save = () => {
+        // the proxy is shown masked: saving it untouched would store "***" as the password
+        if (key === 'proxy' && input.value === String(definition.value ?? '') && input.value.includes('***')) return Promise.resolve();
+        return update('settings', '/api/settings', { key, value: definition.type === 'boolean' ? String(input.checked) : input.value });
+      };
       if (definition.type === 'boolean' || definition.choices) input.addEventListener('change', () => run(save));
       else entry.append(button('Save', save, 'primary'));
     }
@@ -634,6 +649,7 @@ async function start() {
   try {
     const selected = JSON.parse(savedFilters);
     for (const name of [...filterNames, 'all']) if (typeof selected?.[name] === 'boolean') filterState[name] = selected[name];
+    if (selected && typeof selected === 'object') filtersChosen = true;
   } catch {}
   $('theme-toggle').addEventListener('click', () => {
     const current = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
@@ -648,7 +664,7 @@ async function start() {
     persist(sessionStorage, 'dashboardToken', token);
     $('auth-panel').hidden = true;
     $('dashboard').hidden = false;
-    run(async () => { state = await api('/api/state'); readonly = Boolean(state.readonly); $('readonly-badge').hidden = !readonly; $('miner-state').textContent = state.state || 'Unknown'; await renderPage(); connect(); });
+    run(async () => { setState(await api('/api/state')); $('readonly-badge').hidden = !readonly; $('miner-state').textContent = state.state || 'Unknown'; await renderPage(); connect(); });
   });
   window.addEventListener('hashchange', navigate);
   navigate();
@@ -659,8 +675,7 @@ async function start() {
     $('readonly-badge').hidden = !readonly;
     if (auth) token = stored(sessionStorage, 'dashboardToken') || '';
     if (auth && !token) { showAuth(); return; }
-    state = await api('/api/state');
-    readonly = Boolean(state.readonly);
+    setState(await api('/api/state'));
     $('miner-state').textContent = state.state || 'Unknown';
     $('readonly-badge').hidden = !readonly;
     $('dashboard').hidden = false;

@@ -42,12 +42,37 @@ _command_writer: ContextVar[Callable[[str], None] | None] = ContextVar("command_
 
 
 _USER_ID = re.compile(r"(user ID: )\d+", re.IGNORECASE)
+# pubsub topics carry user or channel IDs, e.g. user-drop-events.<user_id>
+_TOPIC_ID = re.compile(r"\b([a-z][a-z-]*[a-z])\.\d+\b")
+
+
+# any long number in a log line is treated as an ID: Twitch user/channel IDs and composite
+# drop instance IDs (user#campaign#drop) all have 5+ digits; minutes, counts and ports
+# ("host:23450", "[::1]:23450") stay visible, JSON values ('"user_id":1234567') do not
+_LONG_NUMBER = re.compile(r"(?<![\d.])(?<![\w\]]:)\d{5,}(?![\d.])")
+
+
+def redact_ids(text: str) -> str:
+    """Hide account and pubsub IDs; safe for every output, including the local terminal."""
+    text = _TOPIC_ID.sub(r"\1.<redacted>", _USER_ID.sub(r"\1<redacted>", text))
+    return _LONG_NUMBER.sub("<id>", text)
+
+
+class IdRedactingFilter(logging.Filter):
+    """Redact IDs once, before any handler (terminal, file, dashboard) sees the record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_ids(message)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        return True
 
 
 def _redact(line: str) -> str:
     if line.startswith("Enter this code: "):
         return "Enter this code: <redacted>"
-    return _USER_ID.sub(r"\1<redacted>", _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line))
+    return redact_ids(_DEVICE_CODE_QUERY.sub(_redact_device_code_query, line))
 
 
 def _redact_device_code_query(match: re.Match[str]) -> str:
@@ -283,10 +308,12 @@ class CLIManager:
         self._stdin_fd: int | None = None
         self._stdin_blocking: bool | None = None
         self._logout_confirmation = False
-        self._campaign_filters = CampaignFilters()
+        # resolved on first use: the default depends on the priority mode
+        self._campaign_filters: CampaignFilters | None = None
         self._watch_task: asyncio.Task[None] | None = None
         self._remote_watches: dict[Callable[[str], None], asyncio.Task[None]] = {}
         self._handler.setFormatter(OUTPUT_FORMATTER)
+        self._handler.addFilter(IdRedactingFilter())
         logger.addHandler(self._handler)
         if (logging_level := logger.getEffectiveLevel()) < logging.ERROR:
             self.print(f"Logging level: {logging.getLevelName(logging_level)}")
@@ -410,7 +437,8 @@ class CLIManager:
                 # remote output is a command reply: no timestamp
                 writer(_redact(line))
                 continue
-            sys.stdout.write(f"{output}\n")
+            # the local terminal keeps the device code (the owner types it) but never the IDs
+            sys.stdout.write(f"{redact_ids(output)}\n")
             recorded = f"{stamp}: {_redact(line)}"
             self._logs.append(recorded)
             self._notify("log", recorded)
@@ -683,6 +711,9 @@ class CLIManager:
             changes[key] = value.casefold() == "on"
         return changes
 
+    def _current_filters(self) -> CampaignFilters:
+        return self._campaign_filters if self._campaign_filters is not None else self.actions.default_filters()
+
     def _command_campaigns(self, values: list[str]) -> None:
         include_all = False
         changes: list[str] = []
@@ -702,7 +733,7 @@ class CLIManager:
                 # multi-word game names work without quoting, like "game" and "drops"
                 words.append(value)
         game = " ".join(words) or None
-        selected = replace(self._campaign_filters, **self._filter_changes(changes))
+        selected = replace(self._current_filters(), **self._filter_changes(changes))
         self.print("game | campaign | status | linked | progress | claimed/total | ends at | link")
         for campaign in self.actions.campaigns(selected, game=game, include_all=include_all):
             self.print(
@@ -787,7 +818,7 @@ class CLIManager:
             task.cancel()
 
     def _command_filters(self, values: list[str]) -> None:
-        self._campaign_filters = replace(self._campaign_filters, **self._filter_changes(values))
+        self._campaign_filters = replace(self._current_filters(), **self._filter_changes(values))
         for field in fields(CampaignFilters):
             self.print(f"{field.name} = {'on' if getattr(self._campaign_filters, field.name) else 'off'}")
 

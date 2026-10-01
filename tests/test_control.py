@@ -94,6 +94,14 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_escaped_long_line_fits_the_client_reader(self) -> None:
+        # every quote doubles once JSON-escaped, so the raw cap alone overflows the packet
+        self.manager._command_progress = lambda: self.manager.print('"' * 16000)
+        output: list[str] = []
+        self.assertEqual(await send_command(self.data_dir, "progress", output=output.append), 0)
+        self.assertTrue(output)
+        self.assertTrue(set(output[0]) <= {'"'})
+
     async def test_watch_stop_and_disconnect(self) -> None:
         self.manager._command_progress = lambda: self.manager.print("tick")
         reader, writer = await open_control(self.data_dir)
@@ -316,18 +324,49 @@ runpy.run_path("main.py", run_name="__main__")
 
 
 class WindowsAclTests(unittest.TestCase):
-    def test_icacls_restricts_to_current_user_and_fails_closed(self) -> None:
-        import control
+    def test_acl_goes_to_the_process_sid_and_fails_closed(self) -> None:
         from unittest.mock import patch
-        with patch.dict(os.environ, {"USERNAME": "alice", "USERDOMAIN": "HOME"}), \
-                patch("control.subprocess.run") as run:
-            run.return_value.returncode = 0
-            control._restrict_windows_acl(Path("control.json"))
-            self.assertEqual(run.call_args.args[0],
-                             ["icacls", "control.json", "/inheritance:r", "/grant:r", "HOME\\alice:F"])
-            run.return_value.returncode = 5
+        import private_file
+
+        def fake_run(command, **kwargs):
+            if command[0] == "whoami":
+                return SimpleNamespace(returncode=0, stdout='"home\\alice","S-1-5-21-1-2-3-1001"\n')
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with patch.object(private_file, "WINDOWS", True), \
+                patch("private_file.subprocess.run", side_effect=fake_run) as run:
+            private_file.restrict_to_owner(Path("secret.json"))
+            # no /reset: that would pass through the inherited (possibly wider) ACL
+            self.assertEqual(len(run.call_args_list), 2)
+            self.assertEqual(run.call_args_list[1].args[0],
+                             ["icacls", "secret.json", "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:F"])
+            run.side_effect = lambda command, **kwargs: SimpleNamespace(returncode=5, stdout="")
             with self.assertRaises(OSError):
-                control._restrict_windows_acl(Path("control.json"))
+                private_file.restrict_to_owner(Path("secret.json"))
+        with patch("private_file.subprocess.run") as run:
+            private_file.restrict_to_owner(Path("secret.json"))
+            run.assert_not_called()
+
+
+class RewritePrivateTests(unittest.TestCase):
+    def test_rewrite_uses_a_fresh_restricted_file_and_keeps_original_on_failure(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+        import private_file
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "dashboard.token"
+            target.write_text("old\n")
+            original_inode = target.stat().st_ino
+            with patch.object(private_file, "restrict_to_owner") as restrict:
+                private_file.rewrite_private(target, "token\n")
+            self.assertNotEqual(restrict.call_args.args[0], target)
+            self.assertEqual(target.read_text(), "token\n")
+            self.assertNotEqual(target.stat().st_ino, original_inode)
+            with patch.object(private_file, "restrict_to_owner", side_effect=OSError("icacls failed")):
+                with self.assertRaises(OSError):
+                    private_file.rewrite_private(target, "other\n")
+            self.assertEqual(target.read_text(), "token\n")
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["dashboard.token"])
 
 
 class WindowsAclStartTests(unittest.IsolatedAsyncioTestCase):

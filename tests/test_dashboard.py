@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from aiohttp import ClientSession, WSCloseCode, WSServerHandshakeError, web
+from aiohttp import ClientSession, WSCloseCode, WSMsgType, WSServerHandshakeError, web
 from aiohttp.test_utils import make_mocked_request
 
 from cli_actions import Actions, ActionRejected
@@ -607,6 +607,83 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(refused.exception.status, 429)
             await pending.send_json({"auth": "private-token"})
             self.assertEqual((await pending.receive_json())["type"], "state")
+
+    async def test_limited_address_guesses_are_serialized(self) -> None:
+        from unittest.mock import patch
+        await self.dashboard.stop()
+        self.dashboard = Dashboard(self.manager, self.twitch,
+                                   DashboardConfig(port=0, token="private-token", enabled=True,
+                                                   auth_timeout=0.5))
+        await self.dashboard.start()
+        self.base = f"http://127.0.0.1:{self.dashboard.port}"
+        for _ in range(5):
+            async with self.session.get(self.base + "/api/state") as response:
+                self.assertEqual(response.status, 401)
+        with patch("dashboard._WS_LIMITED_FAILURE_DELAY", 0.5):
+            async with self.session.ws_connect(self.base + "/api/ws") as guess:
+                await guess.send_json({"auth": "wrong-token"})
+                await asyncio.sleep(0.1)
+                # the failed guess still holds the only pending slot of this address
+                with self.assertRaises(WSServerHandshakeError) as refused:
+                    await self.session.ws_connect(self.base + "/api/ws")
+                self.assertEqual(refused.exception.status, 429)
+                await guess.receive()
+                self.assertEqual(guess.close_code, WSCloseCode.POLICY_VIOLATION)
+            async with self.session.ws_connect(self.base + "/api/ws") as valid:
+                await valid.send_json({"auth": "private-token"})
+                self.assertEqual((await valid.receive_json())["type"], "state")
+
+    async def test_concurrent_upgrades_cannot_pass_the_pending_cap(self) -> None:
+        from unittest.mock import patch
+        from aiohttp import web as aiohttp_web
+        await self.dashboard.stop()
+        self.dashboard = Dashboard(self.manager, self.twitch,
+                                   DashboardConfig(port=0, token="private-token", enabled=True,
+                                                   auth_timeout=0.5))
+        await self.dashboard.start()
+        self.base = f"http://127.0.0.1:{self.dashboard.port}"
+        for _ in range(5):
+            async with self.session.get(self.base + "/api/state") as response:
+                self.assertEqual(response.status, 401)
+        real_prepare = aiohttp_web.WebSocketResponse.prepare
+
+        async def slow_prepare(ws, request):
+            # both upgrades sit between the cap check and the handshake at once
+            await asyncio.sleep(0.2)
+            return await real_prepare(ws, request)
+
+        async def attempt():
+            try:
+                ws = await self.session.ws_connect(self.base + "/api/ws")
+            except WSServerHandshakeError as exc:
+                return exc.status
+            await ws.close()
+            return 101
+
+        with patch.object(aiohttp_web.WebSocketResponse, "prepare", slow_prepare), \
+                patch("dashboard._WS_LIMITED_FAILURE_DELAY", 0.05):
+            results = await asyncio.gather(attempt(), attempt())
+            self.assertEqual(sorted(results), [101, 429])
+            # the unauthenticated close is a failed guess: its slot frees after the delay
+            await asyncio.sleep(0.4)
+        self.assertEqual(self.dashboard._pending_auth, {})
+
+    async def test_websocket_rejects_oversized_frames(self) -> None:
+        for token in (None, "private-token"):
+            await self.dashboard.stop()
+            self.dashboard = Dashboard(self.manager, self.twitch,
+                                       DashboardConfig(port=0, token=token, enabled=True))
+            await self.dashboard.start()
+            self.base = f"http://127.0.0.1:{self.dashboard.port}"
+            async with self.session.ws_connect(self.base + "/api/ws") as ws:
+                if token is None:
+                    await ws.receive_json()
+                await ws.send_str("x" * 10000)
+                message = await ws.receive()
+                while message.type == WSMsgType.TEXT:
+                    message = await ws.receive()
+                self.assertIn(message.type, (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING))
+                self.assertIn(ws.close_code, (WSCloseCode.MESSAGE_TOO_BIG, WSCloseCode.POLICY_VIOLATION))
 
     async def test_state_is_delivered_during_continuous_logs(self) -> None:
         async with self.session.ws_connect(self.base + "/api/ws") as ws:

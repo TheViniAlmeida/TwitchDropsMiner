@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import errno
 import hmac
 import ipaddress
@@ -28,10 +28,13 @@ from cli_actions import ActionError, ActionRejected
 from cli_commands import CommandError
 from constants import DATA_DIR
 from utils import resource_path
+from private_file import WINDOWS, restrict_to_owner, rewrite_private
 from version import __version__
 
 
 logger = logging.getLogger("TwitchDrops.dashboard")
+_WS_MAX_MESSAGE = 4096
+_WS_LIMITED_FAILURE_DELAY = 2.0
 _CSP = "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net; connect-src 'self'"
 _ORIGIN = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?\Z")
 
@@ -201,6 +204,13 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
             except FileExistsError:
                 pass
             else:
+                try:
+                    # before the token exists: Windows ignores the 0o600 above
+                    restrict_to_owner(token_file)
+                except OSError:
+                    os.close(descriptor)
+                    token_file.unlink(missing_ok=True)
+                    raise
                 token = secrets.token_urlsafe(32)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                     output.write(token + "\n")
@@ -218,6 +228,9 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
                     token = source.read().strip()
                 if not token:
                     raise DashboardError(f"Dashboard token file is empty: {token_file}")
+                if WINDOWS:
+                    # an existing file may carry a looser ACL: move the token into an owner-only file
+                    rewrite_private(token_file, token + "\n")
         except OSError as exc:
             raise DashboardError(f"Dashboard token file is inaccessible: {token_file}: {exc.strerror}") from exc
         except UnicodeError as exc:
@@ -548,8 +561,10 @@ class Dashboard:
         return web.json_response(self._sanitize(result))
 
     def _state(self) -> dict[str, Any]:
-        return {**self.manager.actions.state(), "auth": self.config.token is not None,
-                "readonly": self.config.readonly}
+        actions = self.manager.actions
+        return {**actions.state(), "auth": self.config.token is not None,
+                "readonly": self.config.readonly,
+                "default_filters": asdict(actions.default_filters())}
 
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -590,32 +605,52 @@ class Dashboard:
         # the token arrives after the upgrade, so a limited address (maybe a shared NAT with a
         # valid user) keeps one pending handshake instead of being locked out
         pending_cap = 1 if self._limited(remote) else 4
-        if self.config.token is not None and self._pending_auth.get(remote, 0) >= pending_cap:
-            return self._error(429, "too many attempts")
-        ws = web.WebSocketResponse(heartbeat=20)
+        reserved = self.config.token is not None
+        if reserved:
+            if self._pending_auth.get(remote, 0) >= pending_cap:
+                return self._error(429, "too many attempts")
+            # reserve before the first await so concurrent upgrades cannot all pass the check
+            self._pending_auth[remote] = self._pending_auth.get(remote, 0) + 1
+
+        def release() -> None:
+            nonlocal reserved
+            if reserved:
+                reserved = False
+                if self._pending_auth[remote] <= 1:
+                    del self._pending_auth[remote]
+                else:
+                    self._pending_auth[remote] -= 1
+
+        # clients only ever send the small auth frame: refuse anything larger
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=_WS_MAX_MESSAGE)
         self._secure_headers(ws, request.path)
-        await ws.prepare(request)
+        try:
+            await ws.prepare(request)
+        except BaseException:
+            release()
+            raise
         self._sockets.add(ws)
         listener = None
         sender = None
         try:
             if self.config.token is not None:
-                self._pending_auth[remote] = self._pending_auth.get(remote, 0) + 1
                 try:
-                    message = await ws.receive(timeout=self.config.auth_timeout)
-                    data = json.loads(message.data) if message.type == WSMsgType.TEXT else None
-                except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
-                    data = None
+                    try:
+                        message = await ws.receive(timeout=self.config.auth_timeout)
+                        data = json.loads(message.data) if message.type == WSMsgType.TEXT else None
+                    except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
+                        data = None
+                    if not isinstance(data, dict) or not isinstance(data.get("auth"), str) or not self._matches(data["auth"]):
+                        if self._limited(remote):
+                            # keep the single pending slot busy: a limited address can only guess
+                            # once per delay, while a valid token still gets in at once
+                            await asyncio.sleep(_WS_LIMITED_FAILURE_DELAY)
+                        else:
+                            self._failed(remote)
+                        await ws.close(code=WSCloseCode.POLICY_VIOLATION)
+                        return ws
                 finally:
-                    if self._pending_auth[remote] <= 1:
-                        del self._pending_auth[remote]
-                    else:
-                        self._pending_auth[remote] -= 1
-                if not isinstance(data, dict) or not isinstance(data.get("auth"), str) or not self._matches(data["auth"]):
-                    if not self._limited(remote):
-                        self._failed(remote)
-                    await ws.close(code=WSCloseCode.POLICY_VIOLATION)
-                    return ws
+                    release()
             await ws.send_json({"type": "state", **self._sanitize(self._state())})
             pending_logs: deque[str] = deque(maxlen=100)
             changed = False

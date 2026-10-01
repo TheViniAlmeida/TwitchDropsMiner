@@ -156,6 +156,9 @@ def setting_value(settings: Settings, key: str) -> str:
     value = getattr(settings, key)
     if key == "proxy" and value:
         proxy = URL(value)
+        # some providers put the credential in the user name: mask both parts
+        if proxy.user is not None:
+            proxy = proxy.with_user("***")
         if proxy.password is not None:
             proxy = proxy.with_password("***")
         if proxy.query_string or proxy.fragment:
@@ -176,6 +179,9 @@ def set_setting(settings: Settings, key: str, raw_value: str) -> str | None:
     value: Any
     if key == "proxy":
         raw_value = raw_value.strip()
+        if "***" in raw_value:
+            # the masked value shown by "settings get" is not the real credential
+            raise CommandError("enter the full proxy URL; the masked value cannot be saved")
         try:
             value = URL(raw_value)
         except ValueError as exc:

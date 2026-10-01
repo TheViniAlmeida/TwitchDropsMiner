@@ -72,6 +72,23 @@ class ConfigV2Tests(unittest.TestCase):
                 resolve_dashboard_config(args, {
                     "TDM_DASHBOARD_TOKEN_FILE": str(config.token_file)})
 
+    def test_token_file_acl_is_restricted_and_failure_leaves_no_token(self):
+        args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_token_file="")
+        with tempfile.TemporaryDirectory() as directory, patch("dashboard.DATA_DIR", Path(directory)):
+            token_file = Path(directory) / "dashboard.token"
+            with patch("dashboard.restrict_to_owner", side_effect=OSError(5, "icacls failed")):
+                with self.assertRaises(DashboardError):
+                    resolve_dashboard_config(args, {})
+            self.assertFalse(token_file.exists())
+            with patch("dashboard.restrict_to_owner") as restrict, patch("dashboard.WINDOWS", True), \
+                    patch("dashboard.rewrite_private") as rewrite:
+                config = resolve_dashboard_config(args, {})
+                self.assertEqual(restrict.call_args.args[0], token_file)
+                rewrite.assert_not_called()
+                self.assertEqual(resolve_dashboard_config(args, {}).token, config.token)
+                # an existing file is moved into a fresh owner-only file
+                rewrite.assert_called_once_with(token_file, config.token + "\n")
+
     def test_empty_env_token_is_an_error(self):
         args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_port=None)
         with self.assertRaises(argparse.ArgumentError):
@@ -121,6 +138,10 @@ class FakeActions:
 
     def state(self):
         return {"state": "idle"}
+
+    def default_filters(self):
+        from cli_actions import CampaignFilters
+        return CampaignFilters(not_linked=True)
 
     def progress(self):
         self.samples += 1
@@ -177,6 +198,9 @@ class RoutesV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads((await self.call("/api/meta")).text),
                          {"auth": False, "readonly": False, "version": __version__})
         self.assertEqual(json.loads((await self.call("/api/state")).text)["auth"], False)
+        self.assertEqual(json.loads((await self.call("/api/state")).text)["default_filters"],
+                         {"not_linked": True, "upcoming": True, "expired": False,
+                          "excluded": False, "finished": False})
         self.assertEqual(json.loads((await self.call("/api/games")).text)[0]["status"], "available")
         self.assertEqual(json.loads((await self.call("/api/drops?target=A")).text),
                          [{"target": "A"}])
