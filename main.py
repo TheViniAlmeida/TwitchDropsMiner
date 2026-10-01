@@ -167,6 +167,7 @@ if __name__ == "__main__":
         import_parser.add_argument("--from-jar", dest="from_jar")
         ctl_parser = cli_subparsers.add_parser("ctl")
         ctl_parser.add_argument("-y", action="store_true")
+        ctl_parser.add_argument("--json", action="store_true", help="print a read-only command's result as JSON")
         ctl_parser.add_argument("words", nargs=argparse.REMAINDER)
         args = parser.parse_args(namespace=ParsedArgs())
         if isinstance(getattr(args, "game", None), list):

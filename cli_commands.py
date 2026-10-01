@@ -87,8 +87,18 @@ def run_control_client(args: Any) -> int:
             return False
         return input("Back up and remove saved login? [y/N] ").casefold() == "y"
 
+    json_output = getattr(args, "json", False)
+    if json_output and not args.words:
+        print("--json needs a command, e.g. cli ctl --json status", file=sys.stderr)
+        return 2
     try:
         asyncio.run(probe())
+        if json_output:
+            # read-only on the miner side: logout and other changes are refused there
+            return asyncio.run(send_command(
+                DATA_DIR, quote_command(args.words), json_output=True,
+                errors=lambda line: print(line, file=sys.stderr),
+            ))
         if args.words:
             if not confirm_logout(args.words):
                 return 2

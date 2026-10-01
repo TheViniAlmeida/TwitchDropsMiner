@@ -96,8 +96,12 @@ filter toggles and expandable drops), Games (priority, exclusions and channel se
 Channels (watch controls), Settings and Logs. Search filters the current page. Inventory filters
 and the light/dark theme persist in browser local storage. The layout adapts to a bottom tab bar
 on mobile. Priority and exclusion controls use the matching `GET` and `POST` routes.
-From another terminal, `main.py cli ctl state` queries the running miner through its local
+From another terminal, `main.py cli ctl status` queries the running miner through its local
 control channel; `main.py cli ctl help` lists the available remote console commands.
+For scripts, `main.py cli ctl --json <command>` prints the result of a read-only command
+(`status`, `channels`, `inventory [all]`, `games [--names]`, `campaigns`, `drops <name>`,
+`game <name>`, `progress`, `settings`, `get [key]`, `priority`, `exclude`, `filters`) as JSON on
+stdout, with errors on stderr and exit code 1. Commands that change anything are refused in this mode.
 Authentication failures are limited per client IP, so clients behind one reverse proxy share
 the limit for invalid tokens while valid tokens remain usable. Use TLS at the proxy for remote access.
 
