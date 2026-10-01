@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Callable
 from typing import Any
 
 from yarl import URL
 
-from constants import COOKIES_PATH, LOCK_PATH, PriorityMode
+from constants import COOKIES_PATH, DATA_DIR, LOCK_PATH, PriorityMode
 from settings import Settings
 from translate import _
 from utils import lock_file
@@ -37,6 +38,91 @@ BOOL_VALUES = {
 
 class CommandError(ValueError):
     pass
+
+
+def _remote_command(args: Any) -> list[str]:
+    if args.command == "settings":
+        if args.settings_command == "show":
+            return ["settings"]
+        if args.settings_command == "get":
+            return ["get", args.key]
+        return ["set", args.key, args.value]
+    if args.command == "logout":
+        return ["logout"]
+    action = getattr(args, f"{args.command}_command")
+    return [args.command, action] + (
+        [args.game] if action in ("add", "remove", "move") else []
+    ) + ([args.position] if action == "move" else [])
+
+
+def run_control_client(args: Any) -> int:
+    from control import ControlUnavailable, open_control, quote_command, send_command
+
+    async def probe() -> None:
+        reader, writer = await open_control(DATA_DIR)
+        writer.close()
+        await writer.wait_closed()
+
+    def confirm_logout(words: list[str]) -> bool:
+        if not words or words[0] != "logout" or args.y:
+            return True
+        if not sys.stdin.isatty():
+            print("logout requires -y when stdin is not a TTY", file=sys.stderr)
+            return False
+        return input("Delete saved login (cookies.jar)? [y/N] ").casefold() == "y"
+
+    try:
+        asyncio.run(probe())
+        if args.words:
+            if not confirm_logout(args.words):
+                return 2
+            return asyncio.run(send_command(DATA_DIR, quote_command(args.words), confirm=args.y or args.words[0] == "logout"))
+        while True:
+            try:
+                line = input("ctl> ")
+            except EOFError:
+                return 0
+            if line.strip() in ("quit", "exit"):
+                return 0
+            if not line.strip():
+                continue
+            import shlex
+
+            try:
+                words = shlex.split(line)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                continue
+            if not confirm_logout(words):
+                continue
+            asyncio.run(send_command(DATA_DIR, line, confirm=bool(words and words[0] == "logout")))
+    except ControlUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+
+
+def _forward_offline(args: Any) -> int:
+    from control import ControlUnavailable, quote_command, send_command
+
+    if args.command == "logout" and not args.yes:
+        if not sys.stdin.isatty():
+            print("logout requires --yes when stdin is not a TTY", file=sys.stderr)
+            return 2
+        if input("Delete saved login (cookies.jar)? [y/N] ").casefold() != "y":
+            print("logout cancelled")
+            return 0
+    try:
+        return asyncio.run(send_command(
+            DATA_DIR, quote_command(_remote_command(args)), confirm=args.command == "logout"
+        ))
+    except ControlUnavailable:
+        print("The miner is running without a control endpoint.", file=sys.stderr)
+        return 3
+    except KeyboardInterrupt:
+        return 130
 
 
 def setting_value(settings: Settings, key: str) -> str:
@@ -170,8 +256,7 @@ def run_offline(args: Any) -> int:
     locked, lock = lock_file(LOCK_PATH)
     if not locked:
         lock.close()
-        print("The miner is running; use the interactive console instead.", file=sys.stderr)
-        return 3
+        return _forward_offline(args)
     try:
         try:
             command = args.command

@@ -27,7 +27,7 @@ if __name__ == "__main__":
     from version import __version__
     from exceptions import CaptchaRequired
     from utils import lock_file, resource_path, set_root_icon
-    from constants import LOGGING_LEVELS, SELF_PATH, FILE_FORMATTER, LOG_PATH, LOCK_PATH
+    from constants import LOGGING_LEVELS, SELF_PATH, FILE_FORMATTER, LOG_PATH, LOCK_PATH, DATA_DIR
 
     if TYPE_CHECKING:
         from _typeshed import SupportsWrite
@@ -121,6 +121,7 @@ if __name__ == "__main__":
         cli_parser = subparsers.add_parser("cli")
         cli_subparsers = cli_parser.add_subparsers(dest="command")
         run_parser = cli_subparsers.add_parser("run")
+        run_parser.add_argument("--no-control", action="store_true")
         run_parser.add_argument("--open-browser", action="store_true")
         run_parser.add_argument("--dashboard", action="store_true")
         run_parser.add_argument("--dashboard-host")
@@ -139,7 +140,7 @@ if __name__ == "__main__":
         priority_subparsers.add_parser("list")
         for action in ("add", "remove"):
             action_parser = priority_subparsers.add_parser(action)
-            action_parser.add_argument("game")
+            action_parser.add_argument("game", nargs="+")
         priority_move_parser = priority_subparsers.add_parser("move")
         priority_move_parser.add_argument("game")
         priority_move_parser.add_argument("position")
@@ -148,10 +149,16 @@ if __name__ == "__main__":
         exclude_subparsers.add_parser("list")
         for action in ("add", "remove"):
             action_parser = exclude_subparsers.add_parser(action)
-            action_parser.add_argument("game")
+            action_parser.add_argument("game", nargs="+")
         logout_parser = cli_subparsers.add_parser("logout")
         logout_parser.add_argument("--yes", action="store_true")
+        ctl_parser = cli_subparsers.add_parser("ctl")
+        ctl_parser.add_argument("-y", action="store_true")
+        ctl_parser.add_argument("words", nargs=argparse.REMAINDER)
         args = parser.parse_args(namespace=ParsedArgs())
+        if isinstance(getattr(args, "game", None), list):
+            # multi-word game names work without shell quoting
+            args.game = " ".join(args.game)
         if args.mode == "cli" and args.command is None:
             cli_parser.print_help()
             parser.exit(2)
@@ -159,6 +166,10 @@ if __name__ == "__main__":
             from cli_commands import run_offline
 
             sys.exit(run_offline(args))
+        if args.command == "ctl":
+            from cli_commands import run_control_client
+
+            sys.exit(run_control_client(args))
         if args.command == "run":
             from dashboard import Dashboard, DashboardError, resolve_dashboard_config
 
@@ -260,15 +271,27 @@ if __name__ == "__main__":
                 lambda *_: loop.call_soon_threadsafe(client.gui.close),
             )
         dashboard = None
+        control = None
         dashboard_start_failed = False
-        if cli_mode and dashboard_config.enabled:
-            dashboard = Dashboard(client.gui, client, dashboard_config)
+        if cli_mode and not args.no_control:
+            from control import ControlServer
+
+            control = ControlServer(client.gui, DATA_DIR)
             try:
-                await dashboard.start()
-            except DashboardError as exc:
-                dashboard_start_failed = True
-                exit_status = 1
-                client.print(str(exc))
+                await control.start()
+            except (OSError, RuntimeError) as exc:
+                # the control channel is optional: keep mining without "cli ctl"
+                control = None
+                client.print(f"control channel disabled ({exc}); \"cli ctl\" is unavailable")
+        if cli_mode and dashboard_config.enabled:
+            if not dashboard_start_failed:
+                dashboard = Dashboard(client.gui, client, dashboard_config)
+                try:
+                    await dashboard.start()
+                except DashboardError as exc:
+                    dashboard_start_failed = True
+                    exit_status = 1
+                    client.print(str(exc))
         try:
             if not dashboard_start_failed:
                 await client.run()
@@ -293,6 +316,11 @@ if __name__ == "__main__":
             if cli_mode:
                 try:
                     async def shutdown_cli():
+                        if control is not None and control.server is not None:
+                            try:
+                                await asyncio.wait_for(control.stop(), timeout=2)
+                            except asyncio.TimeoutError:
+                                logger.warning("Control shutdown timed out")
                         if dashboard is not None:
                             stop_task = asyncio.create_task(dashboard.stop())
                             done, pending = await asyncio.wait({stop_task}, timeout=2)

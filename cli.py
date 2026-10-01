@@ -8,6 +8,7 @@ import re
 import shlex
 import sys
 import threading
+from contextvars import ContextVar
 from collections import OrderedDict, deque
 from collections import abc
 from contextlib import suppress
@@ -37,6 +38,7 @@ logger = logging.getLogger("TwitchDrops")
 _T = TypeVar("_T")
 _COUNTER_STATUS = re.compile(r"\((\d+)/(\d+)\)\s*$")
 _DEVICE_CODE_QUERY = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
+_command_writer: ContextVar[Callable[[str], None] | None] = ContextVar("command_writer", default=None)
 
 
 def _redact_device_code_query(match: re.Match[str]) -> str:
@@ -274,6 +276,7 @@ class CLIManager:
         self._logout_confirmation = False
         self._campaign_filters = CampaignFilters()
         self._watch_task: asyncio.Task[None] | None = None
+        self._remote_watches: dict[Callable[[str], None], asyncio.Task[None]] = {}
         self._handler.setFormatter(OUTPUT_FORMATTER)
         logger.addHandler(self._handler)
         if (logging_level := logger.getEffectiveLevel()) < logging.ERROR:
@@ -391,8 +394,17 @@ class CLIManager:
 
     def print(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
+        writer = _command_writer.get()
         for line in str(message).splitlines() or [""]:
             output = f"{stamp}: {line}"
+            if writer is not None:
+                # remote output is a command reply: no timestamp
+                writer(
+                    "Enter this code: <redacted>"
+                    if line.startswith("Enter this code: ")
+                    else _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line)
+                )
+                continue
             sys.stdout.write(f"{output}\n")
             recorded = (
                 f"{stamp}: Enter this code: <redacted>"
@@ -406,6 +418,9 @@ class CLIManager:
     def _stop_console(self) -> None:
         self._console_stop.set()
         self._cancel_watch()
+        for task in self._remote_watches.values():
+            task.cancel()
+        self._remote_watches.clear()
         self._restore_stdin_blocking()
         if self._console_transport is not None:
             self._console_transport.close()
@@ -482,15 +497,26 @@ class CLIManager:
     def _reload_inventory(self) -> None:
         self.actions.reload()
 
-    async def dispatch_command(self, line: str) -> None:
+    async def dispatch_command(
+        self, line: str, *, writer: Callable[[str], None] | None = None,
+        confirm: bool = False,
+    ) -> bool:
+        context = _command_writer.set(writer)
+        try:
+            return await self._dispatch_command(line, confirm=confirm, remote=writer is not None)
+        finally:
+            _command_writer.reset(context)
+
+    async def _dispatch_command(self, line: str, *, confirm: bool, remote: bool) -> bool:
         self._cancel_watch()
         if not line:
-            return
-        if self._logout_confirmation:
+            return True
+        if self._logout_confirmation and not remote:
             self._logout_confirmation = False
             if line.casefold() == "y":
                 try:
-                    await self._logout()
+                    if not await self._logout():
+                        return False
                 except CommandError as exc:
                     self.print(f"error: {exc}")
                 except Exception as exc:
@@ -498,14 +524,14 @@ class CLIManager:
                     logger.exception("Logout command failed")
             else:
                 self.print("logout cancelled")
-            return
+            return True
         try:
             parts = shlex.split(line)
         except ValueError as exc:
             self.print(f"error: {exc}")
-            return
+            return False
         if not parts:
-            return
+            return True
         try:
             command = parts[0].casefold()
             if command == "help":
@@ -555,18 +581,29 @@ class CLIManager:
                 self._command_set(parts[1:])
             elif command == "logout":
                 self._require_no_extra(parts[1:])
-                self._logout_confirmation = True
-                self.print("Are you sure? [y/N]")
+                if remote:
+                    if not confirm:
+                        raise CommandError("logout requires confirmation (-y)")
+                    if not await self._logout():
+                        return False
+                else:
+                    self._logout_confirmation = True
+                    self.print("Are you sure? [y/N]")
             elif command in ("quit", "exit"):
                 self._require_no_extra(parts[1:])
+                if remote:
+                    raise CommandError("quit is only available in the local console")
                 self.close()
             else:
                 raise CommandError(f"unknown command: {parts[0]}")
         except CommandError as exc:
             self.print(f"error: {exc}")
+            return False
         except Exception as exc:
-            self.print(f"error: {exc}")
+            self.print("error: command failed")
             logger.exception("Console command failed")
+            return False
+        return True
 
     def _require_no_extra(self, values: list[str]) -> None:
         if values:
@@ -673,9 +710,9 @@ class CLIManager:
             )
 
     def _command_drops(self, values: list[str]) -> None:
-        if len(values) != 1:
+        if not values:
             raise CommandError("usage: drops <campaign|game>")
-        drops = self.actions.drops(values[0])
+        drops = self.actions.drops(" ".join(values))
         self.print("game | campaign | drop | status | minutes current/required/remaining | progress")
         for drop in drops:
             self.print(
@@ -685,9 +722,9 @@ class CLIManager:
             )
 
     def _command_game(self, values: list[str]) -> None:
-        if len(values) != 1:
+        if not values:
             raise CommandError("usage: game <name>")
-        game = self.actions.game(values[0])
+        game = self.actions.game(" ".join(values))
         self.print(f"game: {game['name']} | {game['status']}")
         self.print(f"priority: {game['priority_pos'] or '-'} | excluded: {'yes' if game['excluded'] else 'no'}")
         self.print(f"campaigns: {', '.join(campaign['name'] for campaign in game['campaigns']) or '-'}")
@@ -708,6 +745,12 @@ class CLIManager:
         )
 
     def _cancel_watch(self) -> None:
+        writer = _command_writer.get()
+        if writer is not None:
+            task = self._remote_watches.pop(writer, None)
+            if task is not None:
+                task.cancel()
+            return
         if self._watch_task is not None:
             self._watch_task.cancel()
             self._watch_task = None
@@ -728,7 +771,17 @@ class CLIManager:
                 await asyncio.sleep(seconds)
                 self._command_progress()
 
-        self._watch_task = asyncio.create_task(repeat())
+        task = asyncio.create_task(repeat())
+        writer = _command_writer.get()
+        if writer is None:
+            self._watch_task = task
+        else:
+            self._remote_watches[writer] = task
+
+    def stop_remote_watch(self, writer: Callable[[str], None]) -> None:
+        task = self._remote_watches.pop(writer, None)
+        if task is not None:
+            task.cancel()
 
     def _command_filters(self, values: list[str]) -> None:
         self._campaign_filters = replace(self._campaign_filters, **self._filter_changes(values))
@@ -749,12 +802,14 @@ class CLIManager:
             for index, game in enumerate(self.actions.priority("list")["priority"], 1):
                 self.print(f"{index}. {game}")
             return
-        if action == "add" and len(values) == 2:
-            self.actions.priority(action, values[1])
-        elif action == "remove" and len(values) == 2:
-            self.actions.priority(action, values[1])
-        elif action == "move" and len(values) == 3:
-            self.actions.priority(action, values[1], values[2])
+        if action in ("add", "remove") and len(values) >= 2:
+            game = " ".join(values[1:])
+            self.actions.priority(action, game)
+            self.print(f"priority: {action} {game}")
+        elif action == "move" and len(values) >= 3:
+            game = " ".join(values[1:-1])
+            self.actions.priority(action, game, values[-1])
+            self.print(f"priority: move {game} to {values[-1]}")
         else:
             raise CommandError("usage: priority list|add <game>|remove <game>|move <game> <pos>")
 
@@ -766,10 +821,10 @@ class CLIManager:
             for game in self.actions.exclude("list")["exclude"]:
                 self.print(game)
             return
-        if action == "add" and len(values) == 2:
-            self.actions.exclude(action, values[1])
-        elif action == "remove" and len(values) == 2:
-            self.actions.exclude(action, values[1])
+        if action in ("add", "remove") and len(values) >= 2:
+            game = " ".join(values[1:])
+            self.actions.exclude(action, game)
+            self.print(f"exclude: {action} {game}")
         else:
             raise CommandError("usage: exclude list|add <game>|remove <game>")
 
@@ -789,10 +844,12 @@ class CLIManager:
         if warning:
             self.print(warning)
 
-    async def _logout(self) -> None:
+    async def _logout(self) -> bool:
         try:
             await self.actions.logout()
         except ActionRejected as exc:
             self.print(f"error: {exc}")
+            return False
         else:
             self.print("logged out")
+            return True

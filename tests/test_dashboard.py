@@ -105,7 +105,7 @@ async def fake_run(self):
     self.gui.close()
 dashboard.Dashboard.start = forbidden_start
 twitch.Twitch.run = fake_run
-sys.argv = ["main.py", "cli", "run"]
+sys.argv = ["main.py", "cli", "run", "--no-control"]
 runpy.run_path("main.py", run_name="__main__")
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -128,7 +128,7 @@ async def forbidden_run(self):
     raise AssertionError("miner started after dashboard bind failed")
 dashboard.Dashboard.start = failed_start
 twitch.Twitch.run = forbidden_run
-sys.argv = ["main.py", "cli", "run", "--dashboard", "--dashboard-port", "0"]
+sys.argv = ["main.py", "cli", "run", "--no-control", "--dashboard", "--dashboard-port", "0"]
 runpy.run_path("main.py", run_name="__main__")
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -172,7 +172,7 @@ dashboard.Dashboard.stop = fake_stop
 twitch.Twitch.run = fake_run
 twitch.Twitch.shutdown = tracked_shutdown
 mode = sys.argv[-1]
-sys.argv = ["main.py", "cli", "run", "--dashboard"]
+sys.argv = ["main.py", "cli", "run", "--no-control", "--dashboard"]
 runpy.run_path("main.py", run_name="__main__")
 """
         for mode in ("raise", "slow"):
