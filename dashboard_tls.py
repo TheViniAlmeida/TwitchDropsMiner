@@ -41,10 +41,22 @@ def subject_alt_names(addresses: list[str], bound: str) -> str:
     return ",".join([*(f"DNS:{name}" for name in sorted(names)), *(f"IP:{ip}" for ip in sorted(ips))])
 
 
+def _covered(names_file: Path, wanted: str) -> bool:
+    try:
+        saved = set(names_file.read_text(encoding="ascii").split(","))
+    except (OSError, UnicodeError):
+        return False
+    return set(wanted.split(",")) <= saved
+
+
 def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple[Path, Path]:
-    """Return the saved pair, creating it once; the key is owner-only before it holds anything."""
-    cert, key = directory / "cert.pem", directory / "key.pem"
-    if cert.is_file() and key.is_file():
+    """Return the saved pair while it covers every current name, else make a new one.
+
+    The key is owner-only before it holds anything.
+    """
+    cert, key, names_file = directory / "cert.pem", directory / "key.pem", directory / "names.txt"
+    names = subject_alt_names(addresses, bound)
+    if cert.is_file() and key.is_file() and _covered(names_file, names):
         return cert, key
     openssl = shutil.which("openssl")
     if openssl is None:
@@ -60,7 +72,7 @@ def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple
                 [openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
                  "-nodes", "-keyout", str(staged_key), "-out", str(staged_cert), "-days", "825",
                  "-subj", "/CN=TwitchDropsMiner dashboard",
-                 "-addext", "subjectAltName=" + subject_alt_names(addresses, bound),
+                 "-addext", "subjectAltName=" + names,
                  "-addext", "basicConstraints=critical,CA:FALSE",
                  "-addext", "extendedKeyUsage=serverAuth"],
                 capture_output=True, timeout=60, check=False,
@@ -68,9 +80,13 @@ def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple
             if result.returncode != 0 or not staged_cert.is_file():
                 raise TLSError(f"openssl could not create the dashboard certificate (exit {result.returncode})")
             os.chmod(staged_key, 0o600)
-            # the key goes first: a certificate on disk means its key is already in place
+            staged_names = Path(staging, "names.txt")
+            staged_names.write_text(names, encoding="ascii")
+            # key, then certificate, then names: a pair only counts once all three match
+            names_file.unlink(missing_ok=True)
             os.replace(staged_key, key)
             os.replace(staged_cert, cert)
+            os.replace(staged_names, names_file)
     except subprocess.TimeoutExpired as exc:
         raise TLSError("openssl timed out creating the dashboard certificate") from exc
     except OSError as exc:
@@ -79,6 +95,7 @@ def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple
 
 
 def _check_key(key: Path) -> None:
+    # Windows ACLs are not inspected here; the dashboard warns at startup instead
     try:
         info = key.stat()
     except OSError as exc:
@@ -103,7 +120,12 @@ def server_context(cert: Path, key: Path) -> ssl.SSLContext:
 def fingerprint(cert: Path) -> str:
     """SHA-256 of the certificate, as browsers show it, to compare on the warning page."""
     try:
-        der = ssl.PEM_cert_to_DER_cert(cert.read_text(encoding="ascii"))
+        text = cert.read_text(encoding="ascii")
+        # a full chain starts with the server certificate, which is the one browsers show
+        match = re.search(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", text, re.DOTALL)
+        if match is None:
+            raise ValueError("no certificate found")
+        der = ssl.PEM_cert_to_DER_cert(match.group(0))
     except (OSError, ValueError, UnicodeError) as exc:
         raise TLSError(f"cannot read the dashboard certificate {cert}: {exc}") from exc
     digest = hashlib.sha256(der).hexdigest().upper()

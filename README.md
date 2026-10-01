@@ -86,7 +86,10 @@ mode hides controls and rejects changes. Host and Origin checks protect the API;
 certificate of your own, `openssl` creates a self-signed pair once in `TDM_DATA_DIR/dashboard-tls`
 (key `0600`) for `localhost`, the host name and the local IPs. Startup prints its SHA-256
 fingerprint: compare it with the one the browser shows on its first warning before accepting it.
-A given key must not be readable by other users.
+The pair is made again when the host name, the bound host or a local IP is no longer covered,
+so the browser asks once more. A given key must not be readable by other users; on Windows its ACL
+is not checked, so keep it in an owner-only folder. With a full chain, the fingerprint is the first
+(server) certificate's.
 The panel offers Overview (live drop, KPIs and charts), Inventory (campaigns grouped by game,
 filter toggles and expandable drops), Games (priority, exclusions and channel selection),
 Channels (watch controls), Settings and Logs. Search filters the current page. Inventory filters

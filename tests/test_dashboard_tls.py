@@ -65,12 +65,32 @@ class SelfSignedTests(unittest.TestCase):
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode) & 0o077, 0)
-        self.assertEqual(list(self.path.iterdir()), [cert, key] if cert < key else [key, cert])
+        self.assertEqual(sorted(path.name for path in self.path.iterdir()), ["cert.pem", "key.pem", "names.txt"])
         content = cert.read_bytes()
         self.assertEqual(self_signed_pair(self.path, [], "127.0.0.1"), (cert, key))
         self.assertEqual(cert.read_bytes(), content)
         self.assertIsInstance(server_context(cert, key), ssl.SSLContext)
         self.assertRegex(fingerprint(cert), r"\A(?:[0-9A-F]{2}:){31}[0-9A-F]{2}\Z")
+
+    def test_new_names_make_a_new_pair(self) -> None:
+        cert, _key = self_signed_pair(self.path, [], "127.0.0.1")
+        first = cert.read_bytes()
+        self_signed_pair(self.path, [], "panel.lan")
+        self.assertNotEqual(cert.read_bytes(), first)
+        self.assertIn("DNS:panel.lan", (self.path / "names.txt").read_text().split(","))
+        # a pair without its names file (crash before the last step) is never trusted
+        (self.path / "names.txt").unlink()
+        second = cert.read_bytes()
+        self_signed_pair(self.path, [], "panel.lan")
+        self.assertNotEqual(cert.read_bytes(), second)
+
+    def test_fingerprint_of_a_full_chain_is_the_server_certificate(self) -> None:
+        cert, _key = self_signed_pair(self.path, [], "127.0.0.1")
+        chain = Path(self.directory.name) / "fullchain.pem"
+        other, _ = self_signed_pair(Path(self.directory.name) / "other", [], "panel.lan")
+        chain.write_text(cert.read_text() + other.read_text())
+        self.assertEqual(fingerprint(chain), fingerprint(cert))
+        self.assertNotEqual(fingerprint(other), fingerprint(cert))
 
     @unittest.skipUnless(os.name == "posix", "POSIX key permissions")
     def test_key_readable_by_others_is_refused(self) -> None:
@@ -141,6 +161,25 @@ class HTTPSDashboardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TLSStartFailureTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(OPENSSL is None, "openssl is not installed")
+    async def test_failure_after_bind_cleans_everything(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cert, key = self_signed_pair(Path(directory), [], "127.0.0.1")
+            manager = FakeManager()
+            manager.actions = Actions(FakeTwitch(), manager)
+
+            def broken_print(message):
+                raise BrokenPipeError
+
+            manager.print = broken_print
+            dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig(
+                port=0, enabled=True, tls=True, tls_cert=cert, tls_key=key))
+            with self.assertRaises(BrokenPipeError):
+                await dashboard.start()
+            self.assertIsNone(dashboard._runner)
+            self.assertIsNone(dashboard._history_task)
+            self.assertIsNone(asyncio.get_running_loop().get_exception_handler())
+
     async def test_bad_certificate_fails_before_binding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cert, key = Path(directory, "c.pem"), Path(directory, "k.pem")

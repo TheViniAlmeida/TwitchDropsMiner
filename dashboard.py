@@ -335,28 +335,35 @@ class Dashboard:
                 await self._runner.cleanup()
                 self._runner = None
             raise
-        if ssl_context is not None:
-            self._quiet_handshake_errors()
-        self._sample_history()
-        self._history_task = asyncio.create_task(self._sample_history_loop())
-        host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
-        scheme = "https" if ssl_context is not None else "http"
-        self.manager.print(f"Dashboard: {scheme}://{host}:{self.port}/")
-        if cert_fingerprint is not None:
-            self.manager.print(f"Dashboard certificate SHA-256: {cert_fingerprint}")
-        if self.config.token_file is not None:
-            self.manager.print(f"Dashboard token file: {self.config.token_file}")
-        if not is_loopback(self.config.host):
-            if self.config.token is None:
-                warning = "dashboard exposed WITHOUT authentication: anyone on this network can control the miner"
-                self.manager.print(warning)
-                logger.warning(warning)
-            if self.config.host in ("0.0.0.0", "::"):
-                addresses = _local_ips()
-                if addresses:
-                    self.manager.print("Dashboard local IPs: " + ", ".join(addresses))
-            if ssl_context is None:
-                self.manager.print("Dashboard exposed without TLS; use --dashboard-tls or a reverse proxy")
+        try:
+            if ssl_context is not None:
+                self._quiet_handshake_errors()
+            self._sample_history()
+            self._history_task = asyncio.create_task(self._sample_history_loop())
+            host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
+            scheme = "https" if ssl_context is not None else "http"
+            self.manager.print(f"Dashboard: {scheme}://{host}:{self.port}/")
+            if cert_fingerprint is not None:
+                self.manager.print(f"Dashboard certificate SHA-256: {cert_fingerprint}")
+                if WINDOWS and self.config.tls_key is not None:
+                    self.manager.print("Dashboard TLS key ACL is not checked on Windows: keep it in an owner-only folder")
+            if self.config.token_file is not None:
+                self.manager.print(f"Dashboard token file: {self.config.token_file}")
+            if not is_loopback(self.config.host):
+                if self.config.token is None:
+                    warning = "dashboard exposed WITHOUT authentication: anyone on this network can control the miner"
+                    self.manager.print(warning)
+                    logger.warning(warning)
+                if self.config.host in ("0.0.0.0", "::"):
+                    addresses = _local_ips()
+                    if addresses:
+                        self.manager.print("Dashboard local IPs: " + ", ".join(addresses))
+                if ssl_context is None:
+                    self.manager.print("Dashboard exposed without TLS; use --dashboard-tls or a reverse proxy")
+        except BaseException:
+            # nothing may stay half started: listener, history task or loop handler
+            await self.stop()
+            raise
 
     def _quiet_handshake_errors(self) -> None:
         """Drop asyncio's traceback for each failed TLS handshake (plain HTTP, scanners)."""
