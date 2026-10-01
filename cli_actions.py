@@ -34,10 +34,12 @@ class ActionRejected(ActionError):
     """The miner declined an otherwise valid action (HTTP 409)."""
 
 
-_SENSITIVE_QUERY = frozenset((
-    "token", "access_token", "refresh_token", "id_token", "auth", "auth_token",
-    "code", "device_code", "client_secret", "password", "secret", "session", "sig", "signature",
-))
+# link_url is public campaign data (the same for every viewer); still, drop any query key that
+# looks like an identity or credential, matching by substring so variants are covered too
+_SENSITIVE_QUERY = (
+    "token", "auth", "code", "secret", "password", "passwd", "session", "sig", "cookie",
+    "user", "login", "email", "key", "jwt", "state", "nonce", "id_hint",
+)
 
 
 @dataclass(frozen=True)
@@ -143,7 +145,7 @@ class Actions:
                 "total_drops": campaign.total_drops,
                 "starts_at": campaign.starts_at.isoformat(),
                 "ends_at": campaign.ends_at.isoformat(),
-                "image_url": str(campaign.image_url),
+                "image_url": self._safe_url(campaign.image_url),
                 "finished": campaign.finished,
                 "expired": campaign.expired,
                 "drops": [
@@ -157,7 +159,7 @@ class Actions:
                         "claimed": drop.is_claimed,
                         "starts_at": drop.starts_at.isoformat(),
                         "ends_at": drop.ends_at.isoformat(),
-                        "image_url": str(drop.benefits[0].image_url) if drop.benefits else None,
+                        "image_url": self._safe_url(drop.benefits[0].image_url) if drop.benefits else None,
                     }
                     for drop in campaign.drops
                 ],
@@ -190,7 +192,7 @@ class Actions:
             # account linking pages need their query string, minus anything credential-like
             query = [
                 (key, item) for key, item in url.query.items()
-                if key.casefold().replace("-", "_") not in _SENSITIVE_QUERY
+                if not any(part in key.casefold() for part in _SENSITIVE_QUERY)
             ]
             return str(url.with_query(query).with_fragment(None))
         return str(url.with_query(None).with_fragment(None))
@@ -304,7 +306,9 @@ class Actions:
                             and not campaign.finished for campaign in campaigns)
             planned = any(getattr(campaign, "upcoming", False) and getattr(campaign, "eligible", True)
                           and not campaign.finished for campaign in campaigns)
-            status = ("mining" if mining else "excluded" if excluded else
+            # same precedence as campaign_visible: a priority entry overrides the exclusion
+            status = ("mining" if mining else
+                      "excluded" if excluded and name not in self.twitch.settings.priority else
                       "available" if available else "upcoming" if planned else
                       "finished" if campaigns and all(campaign.finished or campaign.expired
                                                        for campaign in campaigns) else "not_linked")

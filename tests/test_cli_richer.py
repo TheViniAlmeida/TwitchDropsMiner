@@ -166,6 +166,9 @@ class RichActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.actions.game("Alpha")["status"], "not_linked")
         self.settings.exclude.add("Alpha")
         self.assertEqual(self.actions.game("Alpha")["status"], "excluded")
+        self.settings.priority = ["Alpha"]
+        self.assertEqual(self.actions.game("Alpha")["status"], "not_linked")
+        self.settings.priority = []
         self.manager._current_drop = campaign.drops[0]
         self.assertEqual(self.actions.game("Alpha")["status"], "mining")
         with self.assertRaises(ActionError):
@@ -206,6 +209,10 @@ class RichActionsTests(unittest.IsolatedAsyncioTestCase):
         self.messages.clear()
         await self.manager.dispatch_command("campaigns --all --filter upcoming=on Alpha")
         self.assertTrue(any("Alpha | Campaign" in message for message in self.messages))
+        self.messages.clear()
+        with patch.object(self.actions, "campaigns", wraps=self.actions.campaigns) as campaigns:
+            await self.manager.dispatch_command("campaigns --all Dead by Daylight")
+        self.assertEqual(campaigns.call_args.kwargs["game"], "Dead by Daylight")
         self.manager._current_drop = campaign.drops[0]
         self.manager.progress.seconds = 15
         self.messages.clear()
@@ -246,4 +253,11 @@ class LinkUrlTests(unittest.TestCase):
                 "https://example.com/link?game=1&access_token=a&Device-Code=b&code=c", keep_query=True
             ),
             "https://example.com/link?game=1",
+        )
+        self.assertEqual(
+            Actions._safe_url(
+                "https://example.com/link?ref=tw&user_id=7&Cookie=x&api_key=y&session_id=z",
+                keep_query=True,
+            ),
+            "https://example.com/link?ref=tw",
         )

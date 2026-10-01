@@ -152,7 +152,12 @@ def setting_value(settings: Settings, key: str) -> str:
     if key == "proxy" and value:
         proxy = URL(value)
         if proxy.password is not None:
-            return str(proxy.with_password("***"))
+            proxy = proxy.with_password("***")
+        if proxy.query_string or proxy.fragment:
+            # a proxy URL query may carry a credential: never echo it
+            proxy = proxy.with_query(None).with_fragment(None)
+            return f"{proxy}?***"
+        return str(proxy)
     if isinstance(value, PriorityMode):
         return value.name.lower()
     if isinstance(value, bool):

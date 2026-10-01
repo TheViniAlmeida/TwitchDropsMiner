@@ -52,6 +52,8 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(setting_value(settings, "proxy"), "http://alice:***@localhost:8080")
         self.assertEqual(settings.proxy, proxy)
         self.assertEqual(settings.proxy.password, "sample")
+        settings.proxy = URL("http://proxy:8080/?token=sample#frag")
+        self.assertEqual(setting_value(settings, "proxy"), "http://proxy:8080/?***")
 
     def test_websocket_log_copy_masks_auth_token(self) -> None:
         message = {"type": "LISTEN", "data": {"auth_token": "sample", "topics": ["a"]}}
