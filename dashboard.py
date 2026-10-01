@@ -28,7 +28,7 @@ from cli_actions import ActionError, ActionRejected
 from cli_commands import CommandError
 from constants import DATA_DIR
 from utils import resource_path
-from private_file import restrict_to_owner
+from private_file import WINDOWS, restrict_to_owner, rewrite_private
 from version import __version__
 
 
@@ -215,8 +215,6 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
             if token is None:
                 if token_file.is_symlink():
                     raise DashboardError(f"Dashboard token path is not a regular file: {token_file}")
-                # an existing file may carry a looser ACL: tighten it before reading the token
-                restrict_to_owner(token_file)
                 descriptor = os.open(token_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
                 with os.fdopen(descriptor, "r", encoding="utf-8") as source:
                     info = os.fstat(source.fileno())
@@ -228,6 +226,9 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
                     token = source.read().strip()
                 if not token:
                     raise DashboardError(f"Dashboard token file is empty: {token_file}")
+                if WINDOWS:
+                    # an existing file may carry a looser ACL: move the token into an owner-only file
+                    rewrite_private(token_file, token + "\n")
         except OSError as exc:
             raise DashboardError(f"Dashboard token file is inaccessible: {token_file}: {exc.strerror}") from exc
         except UnicodeError as exc:

@@ -80,12 +80,14 @@ class ConfigV2Tests(unittest.TestCase):
                 with self.assertRaises(DashboardError):
                     resolve_dashboard_config(args, {})
             self.assertFalse(token_file.exists())
-            with patch("dashboard.restrict_to_owner") as restrict:
+            with patch("dashboard.restrict_to_owner") as restrict, patch("dashboard.WINDOWS", True), \
+                    patch("dashboard.rewrite_private") as rewrite:
                 config = resolve_dashboard_config(args, {})
                 self.assertEqual(restrict.call_args.args[0], token_file)
+                rewrite.assert_not_called()
                 self.assertEqual(resolve_dashboard_config(args, {}).token, config.token)
-                # existing files are tightened again before the token is read
-                self.assertEqual(restrict.call_count, 2)
+                # an existing file is moved into a fresh owner-only file
+                rewrite.assert_called_once_with(token_file, config.token + "\n")
 
     def test_empty_env_token_is_an_error(self):
         args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_port=None)

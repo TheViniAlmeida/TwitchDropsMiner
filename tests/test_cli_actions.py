@@ -194,6 +194,9 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.manager.log_tail(1)[0].endswith("Enter this code: <redacted>"))
         self.manager.print("Login successful, user ID: 123456789")
         self.assertTrue(self.manager.log_tail(1)[0].endswith("user ID: <redacted>"))
+        self.manager.print("Websocket[0]: Adding topics: user-drop-events.123456789, onsite-notifications.123456789")
+        self.assertNotIn("123456789", self.manager.log_tail(1)[0])
+        self.assertIn("user-drop-events.<redacted>", self.manager.log_tail(1)[0])
 
     async def test_encoded_device_code_url_is_masked_in_log_events(self) -> None:
         events = []

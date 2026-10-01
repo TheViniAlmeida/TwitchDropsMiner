@@ -42,12 +42,15 @@ _command_writer: ContextVar[Callable[[str], None] | None] = ContextVar("command_
 
 
 _USER_ID = re.compile(r"(user ID: )\d+", re.IGNORECASE)
+# pubsub topics carry user or channel IDs, e.g. user-drop-events.<user_id>
+_TOPIC_ID = re.compile(r"\b([a-z][a-z-]*[a-z])\.\d+\b")
 
 
 def _redact(line: str) -> str:
     if line.startswith("Enter this code: "):
         return "Enter this code: <redacted>"
-    return _USER_ID.sub(r"\1<redacted>", _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line))
+    line = _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line)
+    return _TOPIC_ID.sub(r"\1.<redacted>", _USER_ID.sub(r"\1<redacted>", line))
 
 
 def _redact_device_code_query(match: re.Match[str]) -> str:

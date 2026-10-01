@@ -328,8 +328,9 @@ class WindowsAclTests(unittest.TestCase):
         with patch.object(private_file, "WINDOWS", True), \
                 patch("private_file.subprocess.run", side_effect=fake_run) as run:
             private_file.restrict_to_owner(Path("secret.json"))
-            self.assertEqual(run.call_args_list[1].args[0], ["icacls", "secret.json", "/reset"])
-            self.assertEqual(run.call_args_list[2].args[0],
+            # no /reset: that would pass through the inherited (possibly wider) ACL
+            self.assertEqual(len(run.call_args_list), 2)
+            self.assertEqual(run.call_args_list[1].args[0],
                              ["icacls", "secret.json", "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:F"])
             run.side_effect = lambda command, **kwargs: SimpleNamespace(returncode=5, stdout="")
             with self.assertRaises(OSError):
@@ -337,6 +338,27 @@ class WindowsAclTests(unittest.TestCase):
         with patch("private_file.subprocess.run") as run:
             private_file.restrict_to_owner(Path("secret.json"))
             run.assert_not_called()
+
+
+class RewritePrivateTests(unittest.TestCase):
+    def test_rewrite_uses_a_fresh_restricted_file_and_keeps_original_on_failure(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+        import private_file
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "dashboard.token"
+            target.write_text("old\n")
+            original_inode = target.stat().st_ino
+            with patch.object(private_file, "restrict_to_owner") as restrict:
+                private_file.rewrite_private(target, "token\n")
+            self.assertNotEqual(restrict.call_args.args[0], target)
+            self.assertEqual(target.read_text(), "token\n")
+            self.assertNotEqual(target.stat().st_ino, original_inode)
+            with patch.object(private_file, "restrict_to_owner", side_effect=OSError("icacls failed")):
+                with self.assertRaises(OSError):
+                    private_file.rewrite_private(target, "other\n")
+            self.assertEqual(target.read_text(), "token\n")
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["dashboard.token"])
 
 
 class WindowsAclStartTests(unittest.IsolatedAsyncioTestCase):
