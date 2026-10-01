@@ -8,6 +8,9 @@ import sys
 import tempfile
 import unittest
 
+import auth_session
+from constants import ClientType
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
@@ -19,6 +22,7 @@ class OfflineCommandsTests(unittest.TestCase):
         self.data_dir = Path(self.temporary_directory.name)
         self.environment = os.environ.copy()
         self.environment["TDM_DATA_DIR"] = str(self.data_dir)
+        self.environment.pop("TDM_ALLOW_LOGOUT", None)
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -88,16 +92,49 @@ class OfflineCommandsTests(unittest.TestCase):
         result = self.cli("exclude", "remove", "Ignored Game")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_logout_yes_deletes_cookies_and_nontty_requires_yes(self) -> None:
+    def test_logout_is_disabled_by_default_and_allowed_moves_cookies(self) -> None:
         cookies = self.data_dir / "cookies.jar"
-        cookies.write_text("cookie data", encoding="utf8")
+        auth_session.write_session("cookie-data", "1", ClientType.ANDROID_APP, cookies)
+        result = self.cli("logout", "--yes")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("logout disabled: Twitch blocks new device logins for ANDROID_APP", result.stderr)
+        self.assertTrue(cookies.exists())
+
+        self.environment["TDM_ALLOW_LOGOUT"] = "1"
         result = self.cli("logout", "--yes")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(cookies.exists())
+        self.assertEqual(auth_session.read_token(self.data_dir / "cookies.jar.bak")[0], "cookie-data")
 
         result = self.cli("logout")
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("requires --yes", result.stderr)
+
+    def test_logout_archives_previous_backup_before_removing_current(self) -> None:
+        cookies = self.data_dir / "cookies.jar"
+        backup = self.data_dir / "cookies.jar.bak"
+        auth_session.write_session("previous-login", "1", ClientType.ANDROID_APP, backup)
+        auth_session.write_session("new-login", "1", ClientType.ANDROID_APP, cookies)
+        self.environment["TDM_ALLOW_LOGOUT"] = "1"
+        result = self.cli("logout", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(cookies.exists())
+        self.assertEqual(auth_session.read_token(backup)[0], "new-login")
+        self.assertEqual(len(list(self.data_dir.glob("cookies.jar.bak.[0-9]*"))), 1)
+        archive = next(self.data_dir.glob("cookies.jar.bak.[0-9]*"))
+        self.assertEqual(auth_session.read_token(archive)[0], "previous-login")
+
+    def test_logout_keeps_corrupt_jar_without_replacing_valid_backup(self) -> None:
+        cookies = self.data_dir / "cookies.jar"
+        backup = self.data_dir / "cookies.jar.bak"
+        auth_session.write_session("valid-login", "1", ClientType.ANDROID_APP, backup)
+        cookies.write_bytes(b"corrupt jar")
+        self.environment["TDM_ALLOW_LOGOUT"] = "1"
+        result = self.cli("logout", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(auth_session.read_token(backup)[0], "valid-login")
+        archive = next(self.data_dir.glob("cookies.jar.bak.[0-9]*"))
+        self.assertEqual(archive.read_bytes(), b"corrupt jar")
 
     def test_lock_held_exits_3(self) -> None:
         code = """

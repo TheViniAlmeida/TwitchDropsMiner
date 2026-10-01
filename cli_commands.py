@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import getpass
+import os
 import sys
+from datetime import datetime
+from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
 from yarl import URL
+import aiohttp
 
-from constants import COOKIES_PATH, LOCK_PATH, PriorityMode
+from auth_session import (
+    archive_count, backup_session, client_name, logout_allowed,
+    install_session, logout_disabled_message, read_token, restore_session, validate_token,
+)
+
+from constants import COOKIES_PATH, LOCK_PATH, ClientType, PriorityMode
 from settings import Settings
 from translate import _
 from utils import lock_file
@@ -166,6 +177,77 @@ def _print_settings(settings: Settings, output: Callable[[str], None]) -> None:
     output("exclude = " + ", ".join(sorted(settings.exclude, key=str.casefold)))
 
 
+async def _check_token(token: str, proxy: URL | None) -> dict:
+    async with aiohttp.ClientSession() as session:
+        return await validate_token(session, token, proxy=proxy)
+
+
+def _run_auth(args: Any) -> int:
+    command = args.auth_command
+    backup_path = COOKIES_PATH.with_name(COOKIES_PATH.name + ".bak")
+    try:
+        if command == "backup":
+            backup = backup_session(COOKIES_PATH)
+            if backup is None:
+                print("no saved session", file=sys.stderr)
+                return 2
+            print(backup)
+            return 0
+        if command == "restore":
+            current, previous = restore_session(COOKIES_PATH)
+            print(f"restored {current} from {backup_path}; previous: {previous}")
+            return 0
+        if command == "status" and not COOKIES_PATH.is_file():
+            print("no saved session", file=sys.stderr)
+            return 2
+        if command == "import":
+            if args.from_jar:
+                token, _ = read_token(Path(args.from_jar))
+            else:
+                token = os.environ.get("TDM_AUTH_TOKEN") or (
+                    getpass.getpass("Twitch auth token: ") if sys.stdin.isatty()
+                    else sys.stdin.readline().strip()
+                )
+            if not token:
+                print("no auth token provided", file=sys.stderr)
+                return 2
+        else:
+            token, _ = read_token(COOKIES_PATH)
+        settings = Settings(args)
+        data = asyncio.run(_check_token(token, settings.proxy))
+        name = client_name(data["client_id"]) or "unknown"
+        if command == "status":
+            expires = data["expires_in"]
+            # Twitch reports 0 for tokens that never expire
+            expiration = "never" if not expires else f"{expires}s"
+            backup = (
+                f"{backup_path} ({datetime.fromtimestamp(backup_path.stat().st_mtime).astimezone().isoformat()})"
+                if backup_path.is_file() else "none"
+            )
+            print(f"client: {name}")
+            print(f"login: {data['login']}")
+            print(f"expires_in: {expiration}")
+            print(f"backup: {backup}")
+            print(f"archives: {archive_count(COOKIES_PATH)}")
+            return 0
+        if data["client_id"] != ClientType.ANDROID_APP.CLIENT_ID:
+            print(
+                f"token belongs to client {name}; only ANDROID_APP sessions can mine drops today",
+                file=sys.stderr,
+            )
+            return 2
+        install_session(token, data["user_id"], ClientType.ANDROID_APP, COOKIES_PATH)
+        print(f"imported session for {data['login']} (ANDROID_APP)")
+        return 0
+    except ValueError as exc:
+        # our own messages: never contain the token
+        print(f"auth error: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        print(f"auth error: {type(exc).__name__}", file=sys.stderr)
+        return 2
+
+
 def run_offline(args: Any) -> int:
     locked, lock = lock_file(LOCK_PATH)
     if not locked:
@@ -176,20 +258,33 @@ def run_offline(args: Any) -> int:
         try:
             command = args.command
             if command == "logout":
+                if not logout_allowed():
+                    print(logout_disabled_message(), file=sys.stderr)
+                    return 2
                 if not args.yes:
                     if not sys.stdin.isatty():
                         print("logout requires --yes when stdin is not a TTY", file=sys.stderr)
                         return 2
-                    answer = input("Delete saved login (cookies.jar)? [y/N] ")
+                    answer = input("Back up and remove saved login? [y/N] ")
                     if answer.casefold() != "y":
                         print("logout cancelled")
                         return 0
                 if COOKIES_PATH.exists():
+                    try:
+                        backup = backup_session(COOKIES_PATH)
+                    except OSError as exc:
+                        print(f"cannot back up the saved session; refusing logout: {exc.strerror or type(exc).__name__}", file=sys.stderr)
+                        return 2
+                    if backup is None:
+                        print("cannot back up the saved session; refusing logout", file=sys.stderr)
+                        return 2
                     COOKIES_PATH.unlink()
-                    print(f"deleted {COOKIES_PATH}")
+                    print(f"backed up {COOKIES_PATH} to {backup} and removed login")
                 else:
                     print(f"no saved login at {COOKIES_PATH}")
                 return 0
+            if command == "auth":
+                return _run_auth(args)
             try:
                 settings = Settings(args)
             except Exception as exc:

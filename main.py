@@ -25,7 +25,7 @@ if __name__ == "__main__":
     from twitch import Twitch
     from settings import Settings
     from version import __version__
-    from exceptions import CaptchaRequired
+    from exceptions import CaptchaRequired, LoginException
     from utils import lock_file, resource_path, set_root_icon
     from constants import LOGGING_LEVELS, SELF_PATH, FILE_FORMATTER, LOG_PATH, LOCK_PATH
 
@@ -151,11 +151,17 @@ if __name__ == "__main__":
             action_parser.add_argument("game")
         logout_parser = cli_subparsers.add_parser("logout")
         logout_parser.add_argument("--yes", action="store_true")
+        auth_parser = cli_subparsers.add_parser("auth")
+        auth_subparsers = auth_parser.add_subparsers(dest="auth_command", required=True)
+        for action in ("status", "backup", "restore"):
+            auth_subparsers.add_parser(action)
+        import_parser = auth_subparsers.add_parser("import")
+        import_parser.add_argument("--from-jar", dest="from_jar")
         args = parser.parse_args(namespace=ParsedArgs())
         if args.mode == "cli" and args.command is None:
             cli_parser.print_help()
             parser.exit(2)
-        if args.command in ("settings", "priority", "exclude", "logout"):
+        if args.command in ("settings", "priority", "exclude", "logout", "auth"):
             from cli_commands import run_offline
 
             sys.exit(run_offline(args))
@@ -278,11 +284,14 @@ if __name__ == "__main__":
             exit_status = 1
             client.prevent_close()
             client.print(_("error", "captcha"))
-        except Exception:
+        except Exception as exc:
             exit_status = 1
             client.prevent_close()
-            client.print("Fatal error encountered:\n")
-            client.print(traceback.format_exc())
+            if cli_mode and isinstance(exc, LoginException):
+                client.print(str(exc))
+            else:
+                client.print("Fatal error encountered:\n")
+                client.print(traceback.format_exc())
         finally:
             if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
                 loop.remove_signal_handler(signal.SIGINT)
@@ -310,10 +319,12 @@ if __name__ == "__main__":
                 except asyncio.TimeoutError:
                     client.print("Shutdown timed out.")
                     try:
-                        if client._session is not None:
+                        if client._session is not None and not client._jar_load_failed:
                             from constants import COOKIES_PATH
 
-                            client._session.cookie_jar.save(COOKIES_PATH)
+                            from auth_session import save_jar
+
+                            save_jar(client._session.cookie_jar, COOKIES_PATH)
                     except Exception:
                         logger.exception("Failed to save cookies after shutdown timeout")
             else:

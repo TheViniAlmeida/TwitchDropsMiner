@@ -238,3 +238,11 @@ placed past the period character at the end.
 @DogancanYr, @Elderly-Emre, @Hweord - For the Turkish (Türkçe) translation corrections and revisions.  
 @Nollasko - For the entirety of the Ukrainian (Українська) translation and revisions.  
 @kilroy98 - For the Ukrainian (Українська) translation corrections and revisions.  
+
+# Login in 2026
+
+Since September 18, 2026, Twitch has blocked new device logins for the ANDROID_APP client. Existing Android sessions may still work: preserve `cookies.jar`; a new device login cannot recreate one. New logins require a browser/integrity-based method, which this project does not yet implement.
+
+The miner saves `cookies.jar` atomically with private permissions and backs up a validated session to `cookies.jar.bak`. When the token changes, the prior backup becomes a dated `cookies.jar.bak.YYYYmmdd-HHMMSS` archive; archives are deduplicated by token and never deleted automatically (each one is a distinct session). A jar without a token is never saved over a saved session without backing it up first, and an unreadable jar is never overwritten. Use `cli auth status` to check the saved session and archive count, `cli auth backup` for an immediate backup, `cli auth restore` to recover the backup (the replaced session goes to `cookies.jar.bak.prev`), or `cli auth import --from-jar PATH` to import another saved jar. `cli auth import` also accepts `TDM_AUTH_TOKEN` or a token from stdin and only accepts ANDROID_APP tokens. Import backs up both the previous and newly imported sessions. A failed backup blocks destructive session changes.
+
+Logout is disabled by default. Set `TDM_ALLOW_LOGOUT=1` to allow `cli logout --yes` or online logout; the offline command backs up the jar before removing it, preserving any previous backup as an archive. **The auth token grants full account access.** Keep the jar and its backups private with permissions `0600`; never share a jar or token.

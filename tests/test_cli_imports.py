@@ -36,6 +36,82 @@ def run_python(*args: str, data_dir: Path) -> subprocess.CompletedProcess[str]:
 
 
 class CLIImportTests(unittest.TestCase):
+    def test_rejected_device_login_exits_without_traceback(self) -> None:
+        try:
+            probe = socket.socket()
+            probe.bind(("127.0.0.1", 0))
+            probe.close()
+        except PermissionError:
+            self.skipTest("loopback sockets are not allowed here: PermissionError")
+
+        class DeviceHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                if self.path != "/oauth2/device":
+                    self.send_error(404)
+                    return
+                self.rfile.read(int(self.headers["Content-Length"]))
+                body = b'{"status":400,"message":"invalid client"}'
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), DeviceHandler)
+            except PermissionError:
+                self.skipTest("loopback sockets are not allowed here: PermissionError")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            endpoint = f"http://127.0.0.1:{server.server_port}/oauth2/device"
+            code = f"""
+import runpy
+import sys
+from contextlib import asynccontextmanager
+for module in ("tkinter", "tkinter.messagebox", "pystray", "PIL", "PIL.Image", "PIL.ImageTk"):
+    sys.modules[module] = None
+import twitch
+original_init = twitch.Twitch.__init__
+original_request = twitch.Twitch.request
+def local_init(self, *args, **kwargs):
+    original_init(self, *args, **kwargs)
+    self._auth_state.device_id = "local-device-id"
+@asynccontextmanager
+async def local_request(self, method, url, **kwargs):
+    if method != "POST" or str(url) != "https://id.twitch.tv/oauth2/device":
+        raise AssertionError("Unexpected external request")
+    async with original_request(self, method, {endpoint!r}, **kwargs) as response:
+        yield response
+twitch.Twitch.__init__ = local_init
+twitch.Twitch.request = local_request
+sys.argv = ["main.py", "cli", "run"]
+runpy.run_path("main.py", run_name="__main__")
+"""
+            environment = os.environ.copy()
+            environment["TDM_DATA_DIR"] = directory
+            try:
+                result = subprocess.run(
+                    [str(PYTHON), "-u", "-c", code], cwd=ROOT, env=environment,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=15,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(
+            "Twitch rejected the device login for client ANDROID_APP: 400 invalid client",
+            result.stdout,
+        )
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("KeyError", result.stdout)
+
     @unittest.skipIf(sys.platform == "win32", "POSIX SIGINT subprocess test")
     def test_dashboard_websocket_sigint_and_no_token_leak(self) -> None:
         try:

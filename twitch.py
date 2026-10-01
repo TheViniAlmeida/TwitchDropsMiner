@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
+from contextvars import ContextVar
 from time import time
 from copy import deepcopy
 from itertools import chain
@@ -10,11 +11,13 @@ from functools import partial
 from collections import abc, deque, OrderedDict
 from datetime import datetime, timedelta, timezone
 from contextlib import suppress, asynccontextmanager
+from pathlib import Path
 from typing import Any, Literal, Final, NoReturn, overload, cast, TYPE_CHECKING
 
 import aiohttp
 from yarl import URL
 
+from auth_session import backup_session, ensure_backup as _ensure_backup, save_jar
 from translate import _
 from channel import Channel
 from websocket import WebsocketPool
@@ -106,6 +109,41 @@ class SkipExtraJsonDecoder(json.JSONDecoder):
 SAFE_LOADS = lambda s: json.loads(s, cls=SkipExtraJsonDecoder)
 
 
+def _oauth_error_reason(message: object, *secrets: str) -> str:
+    if not isinstance(message, str):
+        return "request rejected"
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "<redacted>")
+    reason = "".join(char for char in " ".join(message.split()) if char.isprintable()).strip()[:120]
+    return reason or "request rejected"
+
+
+_backup_error: ContextVar[str] = ContextVar("backup_error", default="backup unavailable")
+
+
+def ensure_backup(path: Path) -> bool:
+    """Report backup failures so callers can preserve the saved session."""
+    if not Path(path).is_file():
+        # nothing saved on disk yet, so there is nothing to lose
+        return True
+    try:
+        if _ensure_backup(path) is not None:
+            return True
+        _backup_error.set("no saved session to back up")
+    except OSError as exc:
+        _backup_error.set(exc.strerror or type(exc).__name__)
+    logger.error("Session backup failed: %s", _backup_error.get())
+    return False
+
+
+def _require_backup(path: Path) -> None:
+    if not ensure_backup(path):
+        raise LoginException(
+            f"cannot back up the saved session; refusing to discard it: {_backup_error.get()}"
+        )
+
+
 class _AuthState:
     def __init__(self, twitch: Twitch):
         self._twitch: Twitch = twitch
@@ -133,8 +171,9 @@ class _AuthState:
             session = self._twitch._session
             if session is not None:
                 jar = cast(aiohttp.CookieJar, session.cookie_jar)
-                jar.clear()
-                COOKIES_PATH.unlink(missing_ok=True)
+                if ensure_backup(COOKIES_PATH):
+                    jar.clear()
+                    COOKIES_PATH.unlink(missing_ok=True)
 
     def clear(self) -> None:
         self._delattrs(
@@ -150,6 +189,11 @@ class _AuthState:
     async def _oauth_login(self) -> str:
         login_form: LoginForm = self._twitch.gui.login
         client_info: ClientInfo = self._twitch._client_type
+        client_name = next(
+            (name for name in ("WEB", "MOBILE_WEB", "ANDROID_APP", "SMARTBOX")
+             if getattr(ClientType, name) is client_info),
+            "unknown",
+        )
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
@@ -180,7 +224,44 @@ class _AuthState:
                     #     "user_code": "8 chars [A-Z]",
                     #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
                     # }
-                    response_json: JsonType = await response.json()
+                    try:
+                        response_json: JsonType = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        response_json = None
+                    if response.status != 200:
+                        message = response_json.get("message") if isinstance(response_json, dict) else None
+                        secrets = tuple(str(response_json[key]) for key in ("device_code", "user_code")
+                                        if isinstance(response_json, dict) and response_json.get(key))
+                        reason = _oauth_error_reason(message, *secrets)
+                        hint = (
+                            '. New device logins for this client are blocked by Twitch; restore a saved session with "cli auth restore" or "cli auth import --from-jar PATH"'
+                            if reason.casefold() == "invalid client" else ""
+                        )
+                        raise LoginException(
+                            f"Twitch rejected the device login for client {client_name}: "
+                            f"{response.status} {reason}{hint}"
+                        )
+                    if not isinstance(response_json, dict) or not response_json.get("device_code"):
+                        message = response_json.get("message") if isinstance(response_json, dict) else None
+                        secrets = tuple(str(response_json[key]) for key in ("device_code", "user_code")
+                                        if isinstance(response_json, dict) and response_json.get(key))
+                        reason = (_oauth_error_reason(message, *secrets) if message is not None else
+                                  "missing device_code" if isinstance(response_json, dict) else "invalid JSON response")
+                        hint = (
+                            '. New device logins for this client are blocked by Twitch; restore a saved session with "cli auth restore" or "cli auth import --from-jar PATH"'
+                            if reason.casefold() == "invalid client" else ""
+                        )
+                        raise LoginException(
+                            f"Twitch rejected the device login for client {client_name}: "
+                            f"{response.status} {reason}{hint}"
+                        )
+                    if not all(response_json.get(key) for key in (
+                        "user_code", "interval", "verification_uri", "expires_in"
+                    )):
+                        raise LoginException(
+                            f"Twitch rejected the device login for client {client_name}: "
+                            f"{response.status} incomplete device response"
+                        )
                     device_code: str = response_json["device_code"]
                     user_code: str = response_json["user_code"]
                     interval: int = response_json["interval"]
@@ -205,16 +286,44 @@ class _AuthState:
                         data=payload,
                         invalidate_after=expires_at,
                     ) as response:
-                        # 200 means success, 400 means the user haven't entered the code yet
                         if response.status != 200:
+                            try:
+                                response_json = await response.json()
+                            except (aiohttp.ContentTypeError, ValueError):
+                                response_json = None
+                            message = response_json.get("message") if isinstance(response_json, dict) else None
+                            reason = _oauth_error_reason(message, device_code, user_code)
+                            code = reason.casefold().replace(" ", "_")
+                            if code == "slow_down":
+                                interval += 5
+                            elif (
+                                code != "authorization_pending"
+                                and response.status != 429
+                                and response.status < 500
+                            ):
+                                # anything else (invalid_grant, expired_token, access_denied...)
+                                # is permanent: waiting for the code to expire would only hide it
+                                raise LoginException(
+                                    f"Twitch rejected the token login for client {client_name}: "
+                                    f"{response.status} {reason}"
+                                )
                             continue
-                        response_json = await response.json()
+                        try:
+                            response_json = await response.json()
+                        except (aiohttp.ContentTypeError, ValueError):
+                            response_json = None
                         # {
                         #     "access_token": "40 chars [A-Za-z0-9]",
                         #     "refresh_token": "40 chars [A-Za-z0-9]",
                         #     "scope": [...],
                         #     "token_type": "bearer"
                         # }
+                        if not isinstance(response_json, dict) or not isinstance(
+                            response_json.get("access_token"), str
+                        ) or not response_json["access_token"]:
+                            raise LoginException(
+                                f"Twitch returned an invalid token response for client {client_name}"
+                            )
                         self.access_token = cast(str, response_json["access_token"])
                         return self.access_token
             except RequestInvalid:
@@ -432,6 +541,7 @@ class _AuthState:
                             # the access token we have is invalid - clear the cookie and reauth
                             logger.info("Restored session is invalid")
                             assert client_info.CLIENT_URL.host is not None
+                            _require_backup(COOKIES_PATH)
                             jar.clear_domain(client_info.CLIENT_URL.host)
                             continue
                         elif response.status == 200:
@@ -444,6 +554,7 @@ class _AuthState:
                     break
                 # otherwise, we need to delete the entire cookie file and clear the jar
                 logger.info("Cookie client ID mismatch")
+                _require_backup(COOKIES_PATH)
                 jar.clear()
                 COOKIES_PATH.unlink(missing_ok=True)
             else:
@@ -454,7 +565,12 @@ class _AuthState:
             login_form.update(_("gui", "login", "logged_in"), self.user_id)
             # update our cookie and save it
             jar.update_cookies(cookie, client_info.CLIENT_URL)
-            jar.save(COOKIES_PATH)
+            save_jar(jar, COOKIES_PATH)
+            try:
+                if backup := backup_session(COOKIES_PATH):
+                    logger.info("Saved session backup: %s", backup)
+            except OSError as exc:
+                logger.warning("Session backup failed: %s", exc.strerror or type(exc).__name__)
         self._twitch.gui.set_logged_in(True)
         self._logged_in.set()
 
@@ -473,6 +589,7 @@ class Twitch:
         self.wanted_games: list[Game] = []
         self.inventory: list[DropsCampaign] = []
         self._drops: dict[str, TimedDrop] = {}
+        self._jar_load_failed: bool = False
         self._campaigns: dict[str, DropsCampaign] = {}
         self._mnt_triggers: deque[datetime] = deque()
         # NOTE: GQL is pretty volatile and breaks everything if one runs into their rate limit.
@@ -511,6 +628,9 @@ class Twitch:
             # if loading in the cookies file ends up in an error, just ignore it
             # clear the jar, just in case
             cookie_jar.clear()
+            # ...but never write the empty jar over the file we could not read
+            self._jar_load_failed = True
+            logger.warning("Saved session could not be loaded; %s will not be overwritten", COOKIES_PATH)
         # create timeouts
         # connection quality mulitiplier determines the magnitude of timeouts
         connection_quality = self.settings.connection_quality
@@ -551,7 +671,13 @@ class Twitch:
             for cookie_key, cookie in list(cookie_jar._cookies.items()):
                 if not cookie:
                     del cookie_jar._cookies[cookie_key]
-            cookie_jar.save(COOKIES_PATH)
+            if self._jar_load_failed:
+                logger.warning("Not saving cookies: the saved session failed to load")
+            else:
+                try:
+                    save_jar(cookie_jar, COOKIES_PATH)
+                except OSError as exc:
+                    logger.error("Failed to save cookies: %s", exc.strerror or type(exc).__name__)
             await self._session.close()
             self._session = None
         self._drops.clear()
