@@ -122,10 +122,39 @@ if __name__ == "__main__":
         cli_subparsers = cli_parser.add_subparsers(dest="command")
         run_parser = cli_subparsers.add_parser("run")
         run_parser.add_argument("--open-browser", action="store_true")
+        settings_parser = cli_subparsers.add_parser("settings")
+        settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
+        settings_subparsers.add_parser("show")
+        settings_get_parser = settings_subparsers.add_parser("get")
+        settings_get_parser.add_argument("key")
+        settings_set_parser = settings_subparsers.add_parser("set")
+        settings_set_parser.add_argument("key")
+        settings_set_parser.add_argument("value")
+        priority_parser = cli_subparsers.add_parser("priority")
+        priority_subparsers = priority_parser.add_subparsers(dest="priority_command", required=True)
+        priority_subparsers.add_parser("list")
+        for action in ("add", "remove"):
+            action_parser = priority_subparsers.add_parser(action)
+            action_parser.add_argument("game")
+        priority_move_parser = priority_subparsers.add_parser("move")
+        priority_move_parser.add_argument("game")
+        priority_move_parser.add_argument("position")
+        exclude_parser = cli_subparsers.add_parser("exclude")
+        exclude_subparsers = exclude_parser.add_subparsers(dest="exclude_command", required=True)
+        exclude_subparsers.add_parser("list")
+        for action in ("add", "remove"):
+            action_parser = exclude_subparsers.add_parser(action)
+            action_parser.add_argument("game")
+        logout_parser = cli_subparsers.add_parser("logout")
+        logout_parser.add_argument("--yes", action="store_true")
         args = parser.parse_args(namespace=ParsedArgs())
         if args.mode == "cli" and args.command is None:
             cli_parser.print_help()
             parser.exit(2)
+        if args.command in ("settings", "priority", "exclude", "logout"):
+            from cli_commands import run_offline
+
+            sys.exit(run_offline(args))
     else:
         import tkinter as tk
         from tkinter import messagebox
@@ -207,7 +236,7 @@ if __name__ == "__main__":
         else:
             client = Twitch(settings)
         loop = asyncio.get_running_loop()
-        if sys.platform == "linux":
+        if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
             loop.add_signal_handler(signal.SIGINT, lambda *_: client.gui.close())
             loop.add_signal_handler(signal.SIGTERM, lambda *_: client.gui.close())
         try:
@@ -222,7 +251,7 @@ if __name__ == "__main__":
             client.print("Fatal error encountered:\n")
             client.print(traceback.format_exc())
         finally:
-            if sys.platform == "linux":
+            if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
                 loop.remove_signal_handler(signal.SIGINT)
                 loop.remove_signal_handler(signal.SIGTERM)
             client.print(_("gui", "status", "exiting"))
