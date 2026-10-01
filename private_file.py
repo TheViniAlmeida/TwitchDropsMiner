@@ -10,10 +10,17 @@ from pathlib import Path
 WINDOWS = sys.platform == "win32"
 
 
+def _run(command: list[str], **options) -> subprocess.CompletedProcess:
+    # a hung tool must fail like a refused one, not freeze its caller
+    try:
+        return subprocess.run(command, capture_output=True, check=False, timeout=30, **options)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(f"{command[0]} timed out") from exc
+
+
 def _process_sid() -> str:
     # whoami ships with Windows and reports the identity of this process, not of %USERNAME%
-    result = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"],
-                            capture_output=True, text=True, check=False)
+    result = _run(["whoami", "/user", "/fo", "csv", "/nh"], text=True)
     sid = result.stdout.strip().rsplit(",", 1)[-1].strip().strip('"')
     if result.returncode != 0 or not sid.startswith("S-1-"):
         raise OSError("cannot determine the account SID of this process")
@@ -29,8 +36,7 @@ def restrict_to_owner(path: Path) -> None:
     if not WINDOWS:
         return
     sid = _process_sid()
-    result = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
-                            capture_output=True, check=False)
+    result = _run(["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"])
     if result.returncode != 0:
         raise OSError(f"cannot restrict access to {path.name} (icacls exit {result.returncode})")
 
@@ -47,6 +53,21 @@ def rewrite_private(path: Path, content: str) -> None:
             raise
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             output.write(content)
+            # on disk before the rename: a power cut must not leave the new name empty
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _sync_directory(directory: Path) -> None:
+    # the rename itself lives in the directory; Windows cannot open a directory for this
+    if WINDOWS:
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

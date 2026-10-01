@@ -16,6 +16,7 @@ if __name__ == "__main__":
     import warnings
     import traceback
     from contextlib import suppress
+    from dataclasses import replace
     from typing import NoReturn, TYPE_CHECKING
 
     import truststore
@@ -302,7 +303,9 @@ if __name__ == "__main__":
                 client.print(f"control channel disabled ({exc}); \"cli ctl\" is unavailable")
         if cli_mode and dashboard_config.enabled:
             if not dashboard_start_failed:
-                dashboard = Dashboard(client.gui, client, dashboard_config)
+                # the panel's progress chart survives a restart
+                dashboard = Dashboard(client.gui, client, replace(
+                    dashboard_config, history_file=DATA_DIR / "dashboard-history.jsonl"))
                 try:
                     await dashboard.start()
                 except DashboardError as exc:
