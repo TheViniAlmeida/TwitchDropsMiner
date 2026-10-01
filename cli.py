@@ -59,7 +59,7 @@ class _Status:
     def __init__(self, manager: CLIManager) -> None:
         self._manager = manager
         self._text: str | None = None
-        self._last_counter_print = 0.0
+        self._last_counter_print: float | None = None
 
     def update(self, text: str) -> None:
         counter = _COUNTER_STATUS.search(text)
@@ -68,7 +68,11 @@ class _Status:
         if counter is not None:
             current, total = (int(value) for value in counter.groups())
             now = monotonic()
-            if current == total or now - self._last_counter_print >= 5:
+            if (
+                current == total
+                or self._last_counter_print is None
+                or now - self._last_counter_print >= 5
+            ):
                 self._last_counter_print = now
                 self._manager.print(f"[status] {text}")
         elif changed:
