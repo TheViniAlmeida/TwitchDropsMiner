@@ -65,6 +65,25 @@ def _remote_command(args: Any) -> list[str]:
     ) + ([args.position] if action == "move" else [])
 
 
+JSON_COMMANDS = (
+    "status, channels, inventory [all], games [--names], campaigns, drops <name>, game <name>, "
+    "progress, settings, get [key], priority, exclude"
+)
+_JSON_READS = {"status", "channels", "inventory", "games", "campaigns", "drops", "game",
+               "progress", "settings", "get"}
+
+
+def json_command_allowed(words: list[str]) -> bool:
+    """Whether a command is read-only even on a miner that ignores the JSON flag."""
+    if not words:
+        return False
+    command, values = words[0].casefold(), words[1:]
+    if command in ("priority", "exclude"):
+        return [value.casefold() for value in values] in ([], ["list"])
+    # "filters" stays out: an older miner pins the session filters even without arguments
+    return command in _JSON_READS
+
+
 def run_control_client(args: Any) -> int:
     from control import ControlUnavailable, open_control, quote_command, send_command
 
@@ -87,8 +106,26 @@ def run_control_client(args: Any) -> int:
             return False
         return input("Back up and remove saved login? [y/N] ").casefold() == "y"
 
+    json_output = getattr(args, "json", False)
+    if "--json" in args.words:
+        # everything after the command is sent as is, so a late flag would be silently ignored
+        print("put --json before the command, e.g. cli ctl --json status", file=sys.stderr)
+        return 2
+    if json_output and not args.words:
+        print("--json needs a command, e.g. cli ctl --json status", file=sys.stderr)
+        return 2
+    # checked here too: an older miner ignores the JSON flag and would run a change as text
+    if json_output and not json_command_allowed(args.words):
+        print(f"--json supports: {JSON_COMMANDS}", file=sys.stderr)
+        return 2
     try:
         asyncio.run(probe())
+        if json_output:
+            # read-only on the miner side: logout and other changes are refused there
+            return asyncio.run(send_command(
+                DATA_DIR, quote_command(args.words), json_output=True,
+                errors=lambda line: print(line, file=sys.stderr),
+            ))
         if args.words:
             if not confirm_logout(args.words):
                 return 2

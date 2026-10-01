@@ -17,6 +17,8 @@ from private_file import WINDOWS as _WINDOWS, restrict_to_owner as _restrict_win
 
 MAX_REQUEST = 16384
 MAX_LINE = 16384
+# a JSON reply goes out in pieces: even fully escaped, each stays far below MAX_REQUEST
+_JSON_CHUNK = 2048
 
 
 class ControlUnavailable(ConnectionError):
@@ -162,6 +164,20 @@ class ControlServer:
                 pass
             self._owned_inode = None
 
+    def _send_json(self, command: str, send: Callable[[str], None], stream: asyncio.StreamWriter) -> bool:
+        try:
+            text = json.dumps(self.manager.command_data(command), ensure_ascii=False)
+        except ValueError as exc:
+            # CommandError and ActionError are ValueErrors with a message meant for the user
+            send(f"error: {exc}")
+            return False
+        except Exception:
+            send("error: command failed")
+            return False
+        for start in range(0, len(text), _JSON_CHUNK):
+            stream.write(_packet({"json": text[start:start + _JSON_CHUNK]}))
+        return True
+
     async def _serve(self, reader: asyncio.StreamReader, stream: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         if task is not None:
@@ -217,6 +233,8 @@ class ControlServer:
                 if parts and parts[0].casefold() == "stop":
                     send("error: no active watch")
                     ok = False
+                elif request.get("json") is True:
+                    ok = self._send_json(command, send, stream)
                 else:
                     ok = await self.manager.dispatch_command(
                         command, writer=send, confirm=request.get("confirm") is True
@@ -293,19 +311,36 @@ async def open_control(
 async def send_command(
     data_dir: Path, command: str, *, confirm: bool = False,
     output: Callable[[str], None] = print, tcp: bool | None = None,
+    json_output: bool = False, errors: Callable[[str], None] | None = None,
 ) -> int:
+    """Run one command on the miner; with json_output, only the JSON reply goes to output."""
+    errors = errors or output
     reader, writer = await open_control(data_dir, tcp=tcp)
     try:
-        writer.write(_packet({"cmd": command, "confirm": confirm}))
+        writer.write(_packet({"cmd": command, "confirm": confirm, **({"json": True} if json_output else {})}))
         await writer.drain()
+        pieces: list[str] = []
         while True:
             response = await _read_packet(reader)
             if response is None:
                 raise ControlUnavailable("control connection closed")
             if "line" in response:
-                output(response["line"])
+                # in JSON mode the lines are errors and stay off the JSON output
+                (errors if json_output else output)(response["line"])
+            if isinstance(response.get("json"), str):
+                pieces.append(response["json"])
             if response.get("done") is True:
-                return 0 if response.get("ok") is True else 1
+                if response.get("ok") is not True:
+                    return 1
+                if json_output:
+                    try:
+                        value = json.loads("".join(pieces))
+                    except json.JSONDecodeError:
+                        # an older miner ignores the json flag and answers in text
+                        errors("error: the running miner does not support --json; restart it")
+                        return 1
+                    output(json.dumps(value, ensure_ascii=False, indent=2))
+                return 0
     except (OSError, ValueError) as exc:
         raise ControlUnavailable("control connection closed") from exc
     finally:

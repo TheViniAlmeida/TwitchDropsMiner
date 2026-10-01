@@ -19,7 +19,7 @@ from typing import Any, TYPE_CHECKING, Callable, TypeVar
 from urllib.parse import unquote
 
 from cli_actions import Actions, ActionError, ActionRejected, CampaignFilters
-from cli_commands import CommandError
+from cli_commands import JSON_COMMANDS, CommandError, json_command_allowed
 from constants import OUTPUT_FORMATTER
 from exceptions import ExitRequest, LoginException
 from progress_timer import ProgressTimer
@@ -73,6 +73,16 @@ def _redact(line: str) -> str:
     if line.startswith("Enter this code: "):
         return "Enter this code: <redacted>"
     return redact_ids(_DEVICE_CODE_QUERY.sub(_redact_device_code_query, line))
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    return value
 
 
 def _redact_device_code_query(match: re.Match[str]) -> str:
@@ -715,6 +725,16 @@ class CLIManager:
         return self._campaign_filters if self._campaign_filters is not None else self.actions.default_filters()
 
     def _command_campaigns(self, values: list[str]) -> None:
+        self.print("game | campaign | status | linked | progress | claimed/total | ends at | link")
+        for campaign in self._campaigns_data(values):
+            self.print(
+                f"{campaign['game']} | {campaign['name']} | {campaign['status']} | "
+                f"{'yes' if campaign['linked'] else 'no'} | {campaign['progress']:.1%} | "
+                f"{campaign['claimed_drops']}/{campaign['total_drops']} | "
+                f"{campaign['ends_at']} | {campaign['link_url'] or '-'}"
+            )
+
+    def _campaigns_data(self, values: list[str]) -> list[dict[str, Any]]:
         include_all = False
         changes: list[str] = []
         words: list[str] = []
@@ -734,14 +754,50 @@ class CLIManager:
                 words.append(value)
         game = " ".join(words) or None
         selected = replace(self._current_filters(), **self._filter_changes(changes))
-        self.print("game | campaign | status | linked | progress | claimed/total | ends at | link")
-        for campaign in self.actions.campaigns(selected, game=game, include_all=include_all):
-            self.print(
-                f"{campaign['game']} | {campaign['name']} | {campaign['status']} | "
-                f"{'yes' if campaign['linked'] else 'no'} | {campaign['progress']:.1%} | "
-                f"{campaign['claimed_drops']}/{campaign['total_drops']} | "
-                f"{campaign['ends_at']} | {campaign['link_url'] or '-'}"
-            )
+        return self.actions.campaigns(selected, game=game, include_all=include_all)
+
+    def command_data(self, line: str) -> Any:
+        """Structured result of a read-only command, for "cli ctl --json", redacted like the text."""
+        try:
+            return _redact_value(self._command_data(line))
+        except CommandError as exc:
+            # messages may echo the arguments: redact them like the text output
+            raise CommandError(_redact(str(exc))) from exc
+        except Exception as exc:
+            logger.exception("Console JSON command failed")
+            raise CommandError("command failed") from exc
+
+    def _command_data(self, line: str) -> Any:
+        try:
+            parts = shlex.split(line)
+        except ValueError as exc:
+            raise CommandError(str(exc)) from exc
+        if not json_command_allowed(parts):
+            raise CommandError(f"--json supports: {JSON_COMMANDS}")
+        command, values = parts[0].casefold(), parts[1:]
+        if command in ("priority", "exclude"):
+            return getattr(self.actions, command)("list")
+        if command == "inventory" and values in ([], ["all"]):
+            return self.actions.inventory(all=bool(values))
+        if command == "games" and values == ["--names"]:
+            return self.actions.game_names()
+        if command == "campaigns":
+            return self._campaigns_data(values)
+        if command in ("drops", "game"):
+            if not values:
+                raise CommandError(f"usage: {command} <name>")
+            return getattr(self.actions, command)(" ".join(values))
+        if command == "get" and len(values) == 1:
+            return {values[0]: self.actions.get_setting(values[0])}
+        simple = {
+            "status": self.actions.state, "channels": self.actions.channels,
+            "games": self.actions.games, "progress": self.actions.progress,
+            "settings": self.actions.settings_schema,
+            "get": lambda: self.actions.settings(include_gui_only=True),
+        }
+        if command in simple and not values:
+            return simple[command]()
+        raise CommandError(f"--json supports: {JSON_COMMANDS}")
 
     def _command_drops(self, values: list[str]) -> None:
         if not values:
@@ -818,9 +874,12 @@ class CLIManager:
             task.cancel()
 
     def _command_filters(self, values: list[str]) -> None:
-        self._campaign_filters = replace(self._current_filters(), **self._filter_changes(values))
+        if values:
+            self._campaign_filters = replace(self._current_filters(), **self._filter_changes(values))
+        # showing them keeps following the defaults, which change with the priority mode
+        current = self._current_filters()
         for field in fields(CampaignFilters):
-            self.print(f"{field.name} = {'on' if getattr(self._campaign_filters, field.name) else 'off'}")
+            self.print(f"{field.name} = {'on' if getattr(current, field.name) else 'off'}")
 
     def _command_settings(self) -> None:
         self.print("key | type | value | choices")
