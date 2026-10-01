@@ -36,6 +36,13 @@ class TLSConfigTests(unittest.TestCase):
         self.assertTrue(config.tls)
         self.assertEqual((config.tls_cert, config.tls_key), (Path("c.pem"), Path("k.pem")))
 
+    def test_empty_paths_are_refused(self) -> None:
+        for args, env in (({"dashboard_cert": "", "dashboard_key": ""}, {}),
+                          ({}, {"TDM_DASHBOARD_CERT": "", "TDM_DASHBOARD_KEY": ""}),
+                          ({"dashboard_cert": "c.pem", "dashboard_key": ""}, {})):
+            with self.subTest(args=args, env=env), self.assertRaisesRegex(argparse.ArgumentError, "empty"):
+                resolve_dashboard_config(_args(**args), env)
+
     def test_cert_and_key_go_together(self) -> None:
         for values in ({"dashboard_cert": "c.pem"}, {"dashboard_key": "k.pem"}):
             with self.subTest(values=values), self.assertRaises(argparse.ArgumentError):
@@ -161,6 +168,31 @@ class HTTPSDashboardTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TLSStartFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_during_bind_cleans_the_runner(self) -> None:
+        manager = FakeManager()
+        manager.actions = Actions(FakeTwitch(), manager)
+        dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig(port=0, enabled=True))
+
+        async def cancelled(self):
+            raise asyncio.CancelledError
+
+        with patch("dashboard.web.TCPSite.start", cancelled):
+            with self.assertRaises(asyncio.CancelledError):
+                await dashboard.start()
+        self.assertIsNone(dashboard._runner)
+
+    @unittest.skipIf(OPENSSL is None, "openssl is not installed")
+    async def test_generated_pair_covers_the_resolved_host_addresses(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("dashboard.DATA_DIR", Path(directory)), \
+                patch("dashboard._local_ips", return_value=[]), \
+                patch("dashboard.socket.gethostbyname_ex", return_value=("host", [], ["10.9.8.7"])):
+            manager = FakeManager()
+            manager.actions = Actions(FakeTwitch(), manager)
+            dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig(port=0, enabled=True, tls=True))
+            dashboard._tls()
+            self.assertIn("IP:10.9.8.7", (Path(directory) / "dashboard-tls" / "names.txt").read_text().split(","))
+
     @unittest.skipIf(OPENSSL is None, "openssl is not installed")
     async def test_failure_after_bind_cleans_everything(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

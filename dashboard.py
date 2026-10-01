@@ -240,8 +240,13 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
             raise DashboardError(f"Dashboard token file is inaccessible: {token_file}: {exc.strerror}") from exc
         except UnicodeError as exc:
             raise DashboardError(f"Dashboard token file is not UTF-8: {token_file}") from exc
-    tls_cert = getattr(args, "dashboard_cert", None) or env.get("TDM_DASHBOARD_CERT") or None
-    tls_key = getattr(args, "dashboard_key", None) or env.get("TDM_DASHBOARD_KEY") or None
+    tls_cert = getattr(args, "dashboard_cert", None)
+    tls_cert = env.get("TDM_DASHBOARD_CERT") if tls_cert is None else tls_cert
+    tls_key = getattr(args, "dashboard_key", None)
+    tls_key = env.get("TDM_DASHBOARD_KEY") if tls_key is None else tls_key
+    if tls_cert == "" or tls_key == "":
+        # an empty path must not quietly turn the requested HTTPS into HTTP
+        raise argparse.ArgumentError(None, "--dashboard-cert and --dashboard-key must not be empty")
     if (tls_cert is None) != (tls_key is None):
         raise argparse.ArgumentError(None, "--dashboard-cert and --dashboard-key must be given together")
     tls = bool(getattr(args, "dashboard_tls", None) or _env_true(env.get("TDM_DASHBOARD_TLS"))
@@ -294,7 +299,13 @@ class Dashboard:
             if self.config.tls_cert is not None and self.config.tls_key is not None:
                 cert, key = self.config.tls_cert, self.config.tls_key
             else:
-                cert, key = self_signed_pair(DATA_DIR / "dashboard-tls", _local_ips(), self.config.host)
+                addresses = list(_local_ips())
+                try:
+                    # Windows has no interface listing: resolving our own name stays local
+                    addresses += socket.gethostbyname_ex(socket.gethostname())[2]
+                except OSError:
+                    pass
+                cert, key = self_signed_pair(DATA_DIR / "dashboard-tls", addresses, self.config.host)
             return server_context(cert, key), fingerprint(cert)
         except TLSError as exc:
             raise DashboardError(str(exc)) from exc
@@ -330,10 +341,12 @@ class Dashboard:
                 await self._runner.cleanup()
                 self._runner = None
             raise DashboardError(f"Dashboard cannot bind {self.config.host}:{self.config.port}: {exc}") from exc
-        except DashboardError:
+        except BaseException:
+            # DashboardError, cancellation or anything else: never leave a bound runner behind
             if self._runner is not None:
                 await self._runner.cleanup()
                 self._runner = None
+            self._site = None
             raise
         try:
             if ssl_context is not None:
