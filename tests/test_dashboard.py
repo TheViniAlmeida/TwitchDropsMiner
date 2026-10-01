@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import subprocess
@@ -26,6 +27,20 @@ from dashboard import Dashboard, DashboardConfig, DashboardError, is_loopback, r
 
 
 class ConfigTests(unittest.TestCase):
+    def test_origins_config_validation(self) -> None:
+        args = argparse.Namespace(dashboard=False)
+        config = resolve_dashboard_config(args, {
+            "TDM_DASHBOARD_ORIGINS": "https://drops.example.com, http://localhost:8787"
+        })
+        self.assertEqual(config.origins, ("https://drops.example.com", "http://localhost:8787"))
+        for invalid in ("https://drops.example.com/path", "https://drops.example.com/",
+                        "ftp://drops.example.com", "https://user@drops.example.com",
+                        "https://drops.example.com:99999", "https://drops.example.com?x=1",
+                        "https://drops.example.com,", "https://drops.example.com,,http://ok.test",
+                        "https://-", "https://.", "https://a..b"):
+            with self.subTest(invalid=invalid), self.assertRaises(argparse.ArgumentError):
+                resolve_dashboard_config(args, {"TDM_DASHBOARD_ORIGINS": invalid})
+
     def test_defaults_and_env_flags(self) -> None:
         args = argparse.Namespace(dashboard=False, dashboard_host=None, dashboard_port=None,
                                   dashboard_readonly=False)
@@ -137,6 +152,10 @@ class FakeManager:
         self.listeners = set()
         self.lines = []
 
+    def print(self, message):
+        self.lines.append(message)
+        print(message)
+
     def subscribe(self, listener):
         self.listeners.add(listener)
 
@@ -175,6 +194,31 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                                    DashboardConfig(port=8787, token="private-token",
                                                    readonly=True, enabled=True))
 
+    async def test_static_routes_without_sockets(self) -> None:
+        async def call_static(path):
+            request = make_mocked_request("GET", path, headers={"Host": "127.0.0.1:8787"},
+                                          app=self.dashboard.app)
+            request._match_info = await self.dashboard.app.router.resolve(request)
+            handler = request.match_info.handler
+            for middleware in reversed(self.dashboard.app.middlewares):
+                previous = handler
+
+                async def wrapped(req, middleware=middleware, previous=previous):
+                    return await middleware(req, previous)
+
+                handler = wrapped
+            return await handler(request)
+
+        for path in ("/", "/static/app.js", "/static/style.css"):
+            with self.subTest(path=path):
+                response = await call_static(path)
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers["Content-Security-Policy"],
+                                 "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net; connect-src 'self'")
+        for path in ("/static/../x", "/static/.secret"):
+            with self.subTest(path=path):
+                self.assertEqual((await call_static(path)).status, 404)
+
     async def call(self, method="GET", path="/api/state", headers=None):
         request = make_mocked_request(method, path, headers={"Host": "127.0.0.1:8787", **(headers or {})},
                                       app=self.dashboard.app)
@@ -198,7 +242,8 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Cache-Control"], "no-store")
-        for route in ("state", "channels", "inventory", "games", "settings", "logs"):
+        for route in ("state", "channels", "inventory", "games", "settings", "logs",
+                      "priority", "exclude"):
             response = await self.call(path="/api/" + route,
                                        headers={"Authorization": "Bearer wrong"})
             self.assertIn(response.status, (401, 429))
@@ -206,9 +251,23 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.dashboard._failures.clear()
         token = {"Authorization": "Bearer private-token"}
         self.assertEqual((await self.call(headers=token)).status, 200)
+        self.assertEqual((await self.call(headers={**token,
+            "Origin": "https://127.0.0.1:8787"})).status, 200)
         self.assertTrue(json.loads((await self.call(headers=token)).text)["readonly"])
+        self.twitch.settings.priority = ["Game A"]
+        self.twitch.settings.exclude = {"Game B"}
+        self.assertEqual(json.loads((await self.call(path="/api/priority", headers=token)).text),
+                         {"priority": ["Game A"]})
+        self.assertEqual(json.loads((await self.call(path="/api/exclude", headers=token)).text),
+                         {"exclude": ["Game B"]})
         self.assertEqual((await self.call(headers={**token, "Host": "evil.example"})).status, 403)
         self.assertEqual((await self.call(headers={**token, "Origin": "http://evil.example"})).status, 403)
+        self.dashboard.config = DashboardConfig(port=8787, token="private-token", readonly=True,
+                                                origins=("https://drops.example.com",))
+        self.assertEqual((await self.call(headers={**token,
+            "Origin": "https://drops.example.com"})).status, 200)
+        self.assertEqual((await self.call(headers={**token,
+            "Origin": "https://other.example.com"})).status, 403)
         self.assertEqual((await self.call(path="/api/ws", headers={"Origin": "http://evil.example"})).status, 403)
         self.assertEqual((await self.call(method="POST", path="/api/reload",
                                           headers={**token, "Content-Type": "text/plain"})).status, 415)
@@ -279,6 +338,9 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("192.0.2.1", output.getvalue())
             self.assertIn("exposed without TLS", output.getvalue())
             self.assertNotIn("private-token", output.getvalue())
+            self.assertEqual(len(self.manager.lines), 4)
+            self.assertTrue(self.manager.lines[0].startswith("Dashboard: "))
+            self.assertTrue(all("private-token" not in line for line in self.manager.lines))
 
     async def test_rest_mutations_share_action_state_changes(self) -> None:
         class Request:
@@ -308,6 +370,18 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
+    async def test_static_files_headers_and_denied_paths(self) -> None:
+        for path in ("/", "/static/app.js", "/static/style.css"):
+            with self.subTest(path=path):
+                async with self.session.get(self.base + path) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers.get("Content-Security-Policy"),
+                                     "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net; connect-src 'self'")
+        for path in ("/static/%2e%2e/x", "/static/.secret"):
+            with self.subTest(path=path):
+                async with self.session.get(self.base + path) as response:
+                    self.assertEqual(response.status, 404)
+
     async def asyncSetUp(self) -> None:
         try:
             probe = socket.socket()
@@ -374,7 +448,8 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
                                                    enabled=True, auth_timeout=0.05))
         await self.dashboard.start()
         self.base = f"http://127.0.0.1:{self.dashboard.port}"
-        routes = ("state", "channels", "inventory", "games", "settings", "logs")
+        routes = ("state", "channels", "inventory", "games", "settings", "logs",
+                  "priority", "exclude")
         for route in routes:
             self.dashboard._failures.clear()
             async with self.session.get(self.base + "/api/" + route) as response:

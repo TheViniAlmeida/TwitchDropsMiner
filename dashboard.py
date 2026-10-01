@@ -12,12 +12,14 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import stat
 import struct
 import time
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, WSCloseCode, web
 
@@ -29,6 +31,7 @@ from utils import resource_path
 
 logger = logging.getLogger("TwitchDrops.dashboard")
 _CSP = "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net; connect-src 'self'"
+_ORIGIN = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?\Z")
 
 
 class DashboardError(RuntimeError):
@@ -78,6 +81,7 @@ class DashboardConfig:
     token_file: Path | None = None
     enabled: bool = False
     auth_timeout: float = 5.0
+    origins: tuple[str, ...] = ()
 
 
 def _env_true(value: str | None) -> bool:
@@ -98,6 +102,27 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentError(None, f"invalid dashboard port: {raw_port}") from exc
     readonly = bool(getattr(args, "dashboard_readonly", None) or _env_true(env.get("TDM_DASHBOARD_READONLY")))
+    raw_origins = env.get("TDM_DASHBOARD_ORIGINS", "")
+    origins = tuple(item.strip() for item in raw_origins.split(",") if item.strip())
+    for origin in origins:
+        if not _ORIGIN.fullmatch(origin):
+            raise argparse.ArgumentError(None, f"invalid TDM_DASHBOARD_ORIGINS origin: {origin}")
+        try:
+            parsed = urlsplit(origin)
+            valid_port = parsed.port is None or parsed.port > 0
+        except ValueError:
+            valid_port = False
+        hostname = parsed.hostname if valid_port else None
+        valid_host = bool(hostname) and (
+            ":" in hostname or all(
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+                for label in hostname.split(".")
+            )
+        )
+        if not valid_host:
+            raise argparse.ArgumentError(None, f"invalid TDM_DASHBOARD_ORIGINS origin: {origin}")
+    if raw_origins.strip() and any(not item.strip() for item in raw_origins.split(",")):
+        raise argparse.ArgumentError(None, "invalid TDM_DASHBOARD_ORIGINS: empty origin")
     token = env.get("TDM_DASHBOARD_TOKEN")
     if token == "":
         raise argparse.ArgumentError(None, "TDM_DASHBOARD_TOKEN must not be empty")
@@ -131,7 +156,7 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
             raise DashboardError(f"Dashboard token file is inaccessible: {token_file}: {exc.strerror}") from exc
         except UnicodeError as exc:
             raise DashboardError(f"Dashboard token file is not UTF-8: {token_file}") from exc
-    return DashboardConfig(host, port, readonly, token, token_file, enabled)
+    return DashboardConfig(host, port, readonly, token, token_file, enabled, origins=origins)
 
 
 class Dashboard:
@@ -152,7 +177,8 @@ class Dashboard:
         )
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/static/{name}", self._static)
-        for name in ("state", "channels", "inventory", "games", "settings", "logs"):
+        for name in ("state", "channels", "inventory", "games", "settings", "logs",
+                     "priority", "exclude"):
             self.app.router.add_get("/api/" + name, self._get)
         for name in ("switch", "reload", "priority", "exclude", "settings", "logout"):
             self.app.router.add_post("/api/" + name, self._post)
@@ -172,15 +198,15 @@ class Dashboard:
                 self._runner = None
             raise DashboardError(f"Dashboard cannot bind {self.config.host}:{self.config.port}: {exc}") from exc
         host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
-        print(f"Dashboard: http://{host}:{self.port}/", flush=True)
+        self.manager.print(f"Dashboard: http://{host}:{self.port}/")
         if self.config.token_file is not None:
-            print(f"Dashboard token file: {self.config.token_file}", flush=True)
+            self.manager.print(f"Dashboard token file: {self.config.token_file}")
         if not is_loopback(self.config.host):
             if self.config.host in ("0.0.0.0", "::"):
                 addresses = _local_ips()
                 if addresses:
-                    print("Dashboard local IPs: " + ", ".join(addresses), flush=True)
-            print("Dashboard exposed without TLS; use a reverse proxy for remote access", flush=True)
+                    self.manager.print("Dashboard local IPs: " + ", ".join(addresses))
+            self.manager.print("Dashboard exposed without TLS; use a reverse proxy for remote access")
 
     async def stop(self) -> None:
         for ws in tuple(self._sockets):
@@ -220,7 +246,9 @@ class Dashboard:
     @web.middleware
     async def _origin(self, request: web.Request, handler: Any) -> web.StreamResponse:
         origin = request.headers.get("Origin")
-        if origin is not None and origin != "http://" + request.headers.get("Host", ""):
+        host = request.headers.get("Host", "")
+        allowed = {f"http://{host}", f"https://{host}", *self.config.origins}
+        if origin is not None and origin not in allowed:
             return self._error(403, "forbidden origin")
         return await handler(request)
 
@@ -309,6 +337,10 @@ class Dashboard:
             if all_value not in ("0", "1"):
                 raise ActionError("all must be 0 or 1")
             result = actions.inventory(all=all_value == "1")
+        elif action == "priority":
+            result = actions.priority("list")
+        elif action == "exclude":
+            result = actions.exclude("list")
         elif action == "logs":
             try:
                 tail = int(request.query.get("tail", "100"))

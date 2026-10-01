@@ -42,6 +42,9 @@ to_add: list[tuple[Path, str, bool]] = [
     (Path("icons/idle.ico"), "./icons", True),
     (Path("icons/error.ico"), "./icons", True),
     (Path("icons/maint.ico"), "./icons", True),
+    (Path("web/index.html"), "./web", True),
+    (Path("web/app.js"), "./web", True),
+    (Path("web/style.css"), "./web", True),
     # SeleniumWire HTTPS/SSL cert file and key
     (Path(SITE_PACKAGES_PATH, "seleniumwire/ca.crt"), "./seleniumwire", False),
     (Path(SITE_PACKAGES_PATH, "seleniumwire/ca.key"), "./seleniumwire", False),

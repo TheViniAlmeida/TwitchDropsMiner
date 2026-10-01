@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Twitch Drops Miner Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div><h1>Twitch Drops Miner</h1><p>State: <strong id="miner-state">—</strong> · Watching: <strong id="watched-channel">—</strong></p></div>
+      <div class="status"><span id="ws-status" class="indicator" role="status">Offline</span><span id="readonly-badge" class="badge" hidden>Read-only</span></div>
+    </header>
+    <p id="message" class="message" role="status" aria-live="polite" hidden></p>
+    <section id="auth-panel" class="card" hidden>
+      <h2>Dashboard token</h2>
+      <form id="auth-form"><label for="auth-token">Token</label><input id="auth-token" type="password" autocomplete="off" required><button type="submit">Connect</button></form>
+    </section>
+    <div id="dashboard" hidden>
+      <section class="card" aria-labelledby="drop-title">
+        <h2 id="drop-title">Current drop</h2>
+        <p><strong id="drop-game">—</strong> · <span id="drop-reward">No active drop</span></p>
+        <label for="drop-progress">Progress: <span id="drop-percent">0%</span></label>
+        <progress id="drop-progress" max="100" value="0"></progress>
+        <p>Remaining: <span id="drop-remaining">—</span></p>
+      </section>
+      <section class="card" aria-labelledby="channels-title">
+        <h2 id="channels-title">Channels</h2>
+        <div class="table-wrap"><table><thead><tr><th>Channel</th><th>Status</th><th>Game</th><th>Viewers</th><th>Drops</th><th>ACL</th><th>Action</th></tr></thead><tbody id="channels-body"></tbody></table></div>
+      </section>
+      <section class="card" aria-labelledby="inventory-title">
+        <div class="section-head"><h2 id="inventory-title">Inventory</h2><div class="inline"><label><input id="show-finished" type="checkbox"> Show finished</label><button id="refresh-inventory" type="button">Refresh</button></div></div>
+        <div id="inventory-list" class="inventory"></div>
+      </section>
+      <section class="card" aria-labelledby="settings-title">
+        <h2 id="settings-title">Settings</h2>
+        <div class="settings-grid">
+          <div><h3>Priority</h3><ol id="priority-list"></ol><form id="priority-form" class="writes inline"><label for="priority-game">Add game</label><input id="priority-game" list="games" required><button type="submit">Add</button></form></div>
+          <div><h3>Excluded games</h3><ul id="exclude-list"></ul><form id="exclude-form" class="writes inline"><label for="exclude-game">Add game</label><input id="exclude-game" list="games" required><button type="submit">Add</button></form></div>
+        </div>
+        <datalist id="games"></datalist>
+        <h3>Other settings</h3><div id="settings-list" class="settings-list"></div>
+      </section>
+      <section class="card" aria-labelledby="log-title"><h2 id="log-title">Log</h2><div id="log-lines" class="log" role="log" aria-live="off"></div></section>
+      <section class="card writes" aria-labelledby="actions-title"><h2 id="actions-title">Actions</h2><div class="inline"><button id="reload" type="button">Reload inventory</button><button id="logout" type="button" class="danger">Logout</button></div></section>
+    </div>
+  </main>
+</body>
+</html>
