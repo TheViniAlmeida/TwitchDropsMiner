@@ -129,13 +129,37 @@ def _host_names(bound: str, origins: tuple[str, ...]) -> set[str]:
 _HISTORY_SAMPLES = 1440
 _HISTORY_KEEP = 86400
 _HISTORY_MAX_BYTES = 8 * 1024 * 1024
+# a sample is about 200 bytes: anything far longer is not one (and may nest deeply)
+_HISTORY_MAX_LINE = 4096
 _SAMPLE_KEYS = {"t", "drop_id", "campaign", "progress", "remaining_minutes", "claimed", "total"}
 
 
+def _number(value: Any) -> bool:
+    return type(value) in (int, float)
+
+
 def _valid_sample(sample: Any) -> bool:
+    """Exactly what _sample_history writes; bool is no number here."""
     return (isinstance(sample, dict) and set(sample) == _SAMPLE_KEYS
-            and type(sample["t"]) is int and isinstance(sample["progress"], (int, float))
-            and 0 <= sample["progress"] <= 1)
+            and type(sample["t"]) is int and _number(sample["progress"]) and 0 <= sample["progress"] <= 1
+            and all(sample[key] is None or type(sample[key]) is str for key in ("drop_id", "campaign"))
+            and (sample["remaining_minutes"] is None or _number(sample["remaining_minutes"]))
+            and all(_number(sample[key]) for key in ("claimed", "total")))
+
+
+def _read_history_lines(path: Path) -> list[str]:
+    # a link is refused even where O_NOFOLLOW does not exist (Windows)
+    if path.is_symlink():
+        raise OSError("is a link, not a regular file")
+    # O_NONBLOCK: a FIFO in its place must not hang the start
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(path, flags), encoding="utf-8", errors="replace") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("not a regular file")
+        if info.st_size > _HISTORY_MAX_BYTES:
+            raise OSError("file too large, starting over")
+        return stream.readlines()
 
 
 @dataclass(frozen=True)
@@ -288,7 +312,6 @@ class Dashboard:
         self.history: deque[dict[str, Any]] = deque(maxlen=_HISTORY_SAMPLES)
         self._history_task: asyncio.Task[None] | None = None
         self._history_errors: set[tuple[str, str]] = set()
-        self._history_lines = 0
         self._loop_handler: Any = None
         self._handler_loop: asyncio.AbstractEventLoop | None = None
         self.app = web.Application(
@@ -444,8 +467,12 @@ class Dashboard:
         try:
             current = self.manager.actions.progress() or {}
             active = self.manager.actions.state().get("current_drop") or {}
+            now = int(time.time())
+            # the clock went back: what now lies in the future would break the chart's order
+            while self.history and self.history[-1]["t"] > now:
+                self.history.pop()
             self.history.append({
-                "t": int(time.time()), "drop_id": current.get("id"),
+                "t": now, "drop_id": current.get("id"),
                 "campaign": current.get("campaign"),
                 "progress": max(0.0, min(1.0, float(current.get(
                     "progress", active.get("progress")) or 0))),
@@ -465,56 +492,41 @@ class Dashboard:
             logger.warning("Dashboard history %s: %s", what, message)
 
     def _load_history(self) -> None:
-        """Bring back the last day of samples, so a restart does not empty the charts."""
+        """Drop samples older than a day, then bring back the saved ones a restart would lose."""
+        now = time.time()
+        while self.history and self.history[0]["t"] < now - _HISTORY_KEEP:
+            self.history.popleft()
         path = self.config.history_file
         if path is None:
             return
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            lines = _read_history_lines(path)
         except FileNotFoundError:
             return
-        except OSError as exc:
+        except Exception as exc:
             self._history_warning("could not be read", exc)
             return
-        try:
-            with os.fdopen(descriptor, encoding="utf-8", errors="replace") as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                    raise OSError("not a regular file")
-                if os.fstat(stream.fileno()).st_size > _HISTORY_MAX_BYTES:
-                    # compaction keeps it far smaller: the next save rewrites it
-                    self._history_lines = 2 * _HISTORY_SAMPLES
-                    raise OSError("file too large, starting over")
-                lines = stream.readlines()
-        except OSError as exc:
-            self._history_warning("could not be read", exc)
-            return
-        now = time.time()
+        # samples stay in time order and none comes from the future (a clock set back)
+        previous = max(self.history[-1]["t"] + 1 if self.history else 0, now - _HISTORY_KEEP)
         for line in lines:
+            if len(line) > _HISTORY_MAX_LINE:
+                continue
             try:
                 sample = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
-            last = self.history[-1]["t"] if self.history else 0
-            # samples stay in time order; a clock set back must not plot the future
-            if _valid_sample(sample) and max(last + 1, now - _HISTORY_KEEP) <= sample["t"] <= now + 60:
+            if _valid_sample(sample) and previous <= sample["t"] <= now:
                 self.history.append(sample)
-        self._history_lines = max(self._history_lines, len(lines))
+                previous = sample["t"]
 
     def _save_history(self) -> None:
         path = self.config.history_file
         if path is None:
             return
         try:
-            if self._history_lines >= 2 * _HISTORY_SAMPLES or not path.exists():
-                # compact: the file keeps at most twice the samples the panel shows
-                rewrite_private(path, "".join(json.dumps(item) + "\n" for item in self.history))
-                self._history_lines = len(self.history)
-                return
-            descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
-                stream.write(json.dumps(self.history[-1]) + "\n")
-            self._history_lines += 1
-        except OSError as exc:
+            # a whole new owner-only file each time: no torn line, no followed link, no loose ACL
+            rewrite_private(path, "".join(json.dumps(item) + "\n" for item in self.history))
+        except Exception as exc:
             self._history_warning("could not be saved", exc)
 
     async def _sample_history_loop(self) -> None:
