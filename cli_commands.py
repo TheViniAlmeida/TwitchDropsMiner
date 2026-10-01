@@ -236,7 +236,10 @@ def _run_auth(args: Any) -> int:
                 file=sys.stderr,
             )
             return 2
-        if COOKIES_PATH.exists() and backup_session(COOKIES_PATH) is None:
+        if (
+            COOKIES_PATH.is_file() and COOKIES_PATH.stat().st_size
+            and backup_session(COOKIES_PATH) is None
+        ):
             raise ValueError("cannot back up the saved session; refusing to replace it")
         write_session(token, data["user_id"], ClientType.ANDROID_APP, COOKIES_PATH)
         if backup_session(COOKIES_PATH) is None:

@@ -54,7 +54,8 @@ def _jar_token(jar: aiohttp.CookieJar) -> str | None:
 def save_jar(jar: aiohttp.CookieJar, path: Path = COOKIES_PATH) -> None:
     """Atomically save the jar; never drop a saved session without a backup of it."""
     path = Path(path)
-    if path.is_file() and _jar_token(jar) is None and _file_token(path) is not None:
+    saved = _file_token(path) if path.is_file() else None
+    if saved is not None and _jar_token(jar) != saved:
         # raises OSError when the backup cannot be written: the saved file stays untouched
         backup_session(path)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -98,6 +99,12 @@ def _archive(source: Path, path: Path) -> None:
     if token is not None and any(_file_token(archive) == token for archive in _archives(path)):
         source.unlink()
         return
+    archive = _archive_path(source, path)
+    os.replace(source, archive)
+    os.chmod(archive, 0o600)
+
+
+def _archive_path(source: Path, path: Path) -> Path:
     base = path.with_name(path.name + ".bak")
     timestamp = datetime.fromtimestamp(source.stat().st_mtime, timezone.utc).strftime("%Y%m%d-%H%M%S")
     archive = base.with_name(f"{base.name}.{timestamp}")
@@ -105,8 +112,7 @@ def _archive(source: Path, path: Path) -> None:
     while archive.exists():
         archive = base.with_name(f"{base.name}.{timestamp}.{suffix}")
         suffix += 1
-    os.replace(source, archive)
-    os.chmod(archive, 0o600)
+    return archive
 
 
 def archive_count(path: Path = COOKIES_PATH) -> int:
@@ -117,6 +123,9 @@ def backup_session(path: Path = COOKIES_PATH) -> Path | None:
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         return None
+    if _file_token(path) is None:
+        # unreadable or tokenless: keep a copy, but never let it replace a usable .bak
+        return _copy_atomic(path, _archive_path(path, path))
     backup = path.with_name(path.name + ".bak")
     if backup.exists() and not _same_token(path, backup):
         _archive(backup, path)
@@ -169,7 +178,13 @@ def _cookie_jar() -> Iterator[aiohttp.CookieJar]:
 
 def read_token(jar_path: Path) -> tuple[str, str]:
     with _cookie_jar() as jar:
-        jar.load(jar_path)
+        try:
+            jar.load(jar_path)
+        except OSError:
+            raise
+        except Exception:
+            # malformed jar: never echo its content
+            raise ValueError("cannot read the session file") from None
         hosts = (ClientType.ANDROID_APP.CLIENT_URL.host, ClientType.MOBILE_WEB.CLIENT_URL.host)
         for host in hosts:
             if host is None:

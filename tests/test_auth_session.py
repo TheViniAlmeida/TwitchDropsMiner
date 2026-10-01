@@ -102,6 +102,32 @@ class SessionFileTests(unittest.TestCase):
                 asyncio.run(save_empty())
         self.assertEqual(auth_session.read_token(self.path)[0], "only-copy")
 
+    def test_save_jar_backs_up_before_replacing_the_token(self) -> None:
+        auth_session.write_session("first-secret", "1", ClientType.ANDROID_APP, self.path)
+        with auth_session._cookie_jar() as jar:
+            jar.update_cookies({"auth-token": "second-secret"}, ClientType.ANDROID_APP.CLIENT_URL)
+            auth_session.save_jar(jar, self.path)
+            backup = self.path.with_name("cookies.jar.bak")
+            self.assertEqual(auth_session.read_token(backup)[0], "first-secret")
+            self.assertEqual(auth_session.read_token(self.path)[0], "second-secret")
+            with patch("auth_session.backup_session", side_effect=OSError(28, "no space")):
+                jar.update_cookies({"auth-token": "third-secret"}, ClientType.ANDROID_APP.CLIENT_URL)
+                with self.assertRaises(OSError):
+                    auth_session.save_jar(jar, self.path)
+            self.assertEqual(auth_session.read_token(self.path)[0], "second-secret")
+
+    def test_corrupt_session_never_replaces_a_valid_backup(self) -> None:
+        backup = self.path.with_name("cookies.jar.bak")
+        auth_session.write_session("valid-secret", "1", ClientType.ANDROID_APP, backup)
+        self.path.write_bytes(b"corrupt")
+        copy = auth_session.backup_session(self.path)
+        self.assertNotEqual(copy, backup)
+        self.assertEqual(copy.read_bytes(), b"corrupt")
+        self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o600)
+        self.assertEqual(auth_session.read_token(backup)[0], "valid-secret")
+        with self.assertRaisesRegex(ValueError, "cannot read the session file"):
+            auth_session.read_token(self.path)
+
     def test_second_restore_keeps_the_first_previous_session(self) -> None:
         auth_session.write_session("backup", "1", ClientType.ANDROID_APP, self.path)
         auth_session.backup_session(self.path)
@@ -236,15 +262,19 @@ class AuthCommandTests(unittest.TestCase):
             self.assertIn("expires_in: never\nbackup: " + str(self.path) + ".bak (", self.output.getvalue())
             validate.side_effect = ValueError("invalid token")
             self.assertEqual(self.run_auth("status"), 2)
+            self.path.write_bytes(b"secret-but-corrupt")
+            self.assertEqual(self.run_auth("status"), 2)
+            self.assertIn("auth error: cannot read the session file", self.errors.getvalue())
         self.assertNotIn("secret", self.output.getvalue() + self.errors.getvalue())
 
     def test_backup_restore_commands_and_lock(self) -> None:
         self.assertEqual(self.run_auth("backup"), 2)
-        self.path.write_bytes(b"original")
+        auth_session.write_session("original", "1", ClientType.ANDROID_APP, self.path)
         self.assertEqual(self.run_auth("backup"), 0)
         self.path.write_bytes(b"replacement")
         self.assertEqual(self.run_auth("restore"), 0)
-        self.assertEqual(self.path.read_bytes(), b"original")
+        self.assertEqual(auth_session.read_token(self.path)[0], "original")
+        self.assertEqual(self.path.with_name("cookies.jar.bak.prev").read_bytes(), b"replacement")
         with patch.object(cli_commands, "lock_file", return_value=(False, self.lock)):
             self.assertEqual(self.run_auth("backup"), 3)
         self.assertIn("The miner is running; use the interactive console instead.", self.errors.getvalue())
