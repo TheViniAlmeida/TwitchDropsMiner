@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import ssl
 import stat
 import struct
 import time
@@ -26,6 +27,7 @@ from aiohttp import WSMsgType, WSCloseCode, web
 
 from cli_actions import ActionError, ActionRejected
 from cli_commands import CommandError
+from dashboard_tls import TLSError, fingerprint, self_signed_pair, server_context
 from constants import DATA_DIR
 from utils import resource_path
 from private_file import WINDOWS, restrict_to_owner, rewrite_private
@@ -135,6 +137,9 @@ class DashboardConfig:
     origins: tuple[str, ...] = ()
     port_range: tuple[int, int] | None = None
     history_interval: float = 60.0
+    tls: bool = False
+    tls_cert: Path | None = None
+    tls_key: Path | None = None
 
 
 def _env_true(value: str | None) -> bool:
@@ -235,8 +240,21 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
             raise DashboardError(f"Dashboard token file is inaccessible: {token_file}: {exc.strerror}") from exc
         except UnicodeError as exc:
             raise DashboardError(f"Dashboard token file is not UTF-8: {token_file}") from exc
+    tls_cert = getattr(args, "dashboard_cert", None)
+    tls_cert = env.get("TDM_DASHBOARD_CERT") if tls_cert is None else tls_cert
+    tls_key = getattr(args, "dashboard_key", None)
+    tls_key = env.get("TDM_DASHBOARD_KEY") if tls_key is None else tls_key
+    if tls_cert == "" or tls_key == "":
+        # an empty path must not quietly turn the requested HTTPS into HTTP
+        raise argparse.ArgumentError(None, "--dashboard-cert and --dashboard-key must not be empty")
+    if (tls_cert is None) != (tls_key is None):
+        raise argparse.ArgumentError(None, "--dashboard-cert and --dashboard-key must be given together")
+    tls = bool(getattr(args, "dashboard_tls", None) or _env_true(env.get("TDM_DASHBOARD_TLS"))
+               or tls_cert is not None)
     return DashboardConfig(host, port, readonly, token, token_file, enabled,
-                           origins=origins, port_range=port_range)
+                           origins=origins, port_range=port_range, tls=tls,
+                           tls_cert=Path(tls_cert) if tls_cert else None,
+                           tls_key=Path(tls_key) if tls_key else None)
 
 
 class Dashboard:
@@ -255,6 +273,8 @@ class Dashboard:
         self.history: deque[dict[str, Any]] = deque(maxlen=1440)
         self._history_task: asyncio.Task[None] | None = None
         self._history_errors: set[str] = set()
+        self._loop_handler: Any = None
+        self._handler_loop: asyncio.AbstractEventLoop | None = None
         self.app = web.Application(
             client_max_size=64 * 1024,
             middlewares=[self._headers, self._host, self._origin, self._auth,
@@ -271,14 +291,37 @@ class Dashboard:
             self.app.router.add_post("/api/" + name, self._post)
         self.app.router.add_get("/api/ws", self._ws)
 
+    def _tls(self) -> tuple[Any, str | None]:
+        """The server SSL context and certificate fingerprint, or (None, None) without TLS."""
+        if not self.config.tls:
+            return None, None
+        try:
+            if self.config.tls_cert is not None and self.config.tls_key is not None:
+                cert, key = self.config.tls_cert, self.config.tls_key
+            else:
+                # every interface, unlike the startup listing: any address that reaches us needs a SAN
+                addresses = [address for _, address in _interface_entries()]
+                try:
+                    # Windows and macOS list few or no interfaces here: our own name adds IPv4 and IPv6
+                    addresses += [info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)]
+                except (OSError, UnicodeError):
+                    pass
+                # hosts the operator declared for this dashboard must be valid names too
+                addresses += [urlsplit(origin).hostname or "" for origin in self.config.origins]
+                cert, key = self_signed_pair(DATA_DIR / "dashboard-tls", addresses, self.config.host)
+            return server_context(cert, key), fingerprint(cert)
+        except TLSError as exc:
+            raise DashboardError(str(exc)) from exc
+
     async def start(self) -> None:
+        ssl_context, cert_fingerprint = self._tls()
         self._runner = web.AppRunner(self.app, access_log=None, shutdown_timeout=0.5)
         try:
             await self._runner.setup()
             ports = (range(self.config.port_range[0], self.config.port_range[1] + 1)
                      if self.config.port_range else (self.config.port,))
             for port in ports:
-                self._site = web.TCPSite(self._runner, self.config.host, port)
+                self._site = web.TCPSite(self._runner, self.config.host, port, ssl_context=ssl_context)
                 try:
                     await self._site.start()
                 except OSError as exc:
@@ -301,29 +344,67 @@ class Dashboard:
                 await self._runner.cleanup()
                 self._runner = None
             raise DashboardError(f"Dashboard cannot bind {self.config.host}:{self.config.port}: {exc}") from exc
-        except DashboardError:
+        except BaseException:
+            # DashboardError, cancellation or anything else: never leave a bound runner behind
             if self._runner is not None:
                 await self._runner.cleanup()
                 self._runner = None
+            self._site = None
             raise
-        self._sample_history()
-        self._history_task = asyncio.create_task(self._sample_history_loop())
-        host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
-        self.manager.print(f"Dashboard: http://{host}:{self.port}/")
-        if self.config.token_file is not None:
-            self.manager.print(f"Dashboard token file: {self.config.token_file}")
-        if not is_loopback(self.config.host):
-            if self.config.token is None:
-                warning = "dashboard exposed WITHOUT authentication: anyone on this network can control the miner"
-                self.manager.print(warning)
-                logger.warning(warning)
-            if self.config.host in ("0.0.0.0", "::"):
-                addresses = _local_ips()
-                if addresses:
-                    self.manager.print("Dashboard local IPs: " + ", ".join(addresses))
-            self.manager.print("Dashboard exposed without TLS; use a reverse proxy for remote access")
+        try:
+            if ssl_context is not None:
+                self._quiet_handshake_errors()
+            self._sample_history()
+            self._history_task = asyncio.create_task(self._sample_history_loop())
+            host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
+            scheme = "https" if ssl_context is not None else "http"
+            self.manager.print(f"Dashboard: {scheme}://{host}:{self.port}/")
+            if cert_fingerprint is not None:
+                self.manager.print(f"Dashboard certificate SHA-256: {cert_fingerprint}")
+                if WINDOWS and self.config.tls_key is not None:
+                    self.manager.print("Dashboard TLS key ACL is not checked on Windows: keep it in an owner-only folder")
+            if self.config.token_file is not None:
+                self.manager.print(f"Dashboard token file: {self.config.token_file}")
+            if not is_loopback(self.config.host):
+                if self.config.token is None:
+                    warning = "dashboard exposed WITHOUT authentication: anyone on this network can control the miner"
+                    self.manager.print(warning)
+                    logger.warning(warning)
+                if self.config.host in ("0.0.0.0", "::"):
+                    addresses = _local_ips()
+                    if addresses:
+                        self.manager.print("Dashboard local IPs: " + ", ".join(addresses))
+                if ssl_context is None:
+                    self.manager.print("Dashboard exposed without TLS; use --dashboard-tls or a reverse proxy")
+        except BaseException:
+            # nothing may stay half started: listener, history task or loop handler
+            await self.stop()
+            raise
+
+    def _quiet_handshake_errors(self) -> None:
+        """Drop asyncio's traceback for each failed TLS handshake (plain HTTP, scanners)."""
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+
+        def handler(current: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            # only server-side handshakes: the miner's own outgoing TLS errors still surface
+            incoming = ("incoming connection" in str(context.get("message", ""))
+                        or getattr(context.get("protocol"), "_server_side", False))
+            if isinstance(context.get("exception"), ssl.SSLError) and incoming:
+                logger.debug("Dashboard TLS handshake failed: %s", context["exception"])
+                return
+            if previous is not None:
+                previous(current, context)
+            else:
+                current.default_exception_handler(context)
+
+        self._loop_handler, self._handler_loop = previous, loop
+        loop.set_exception_handler(handler)
 
     async def stop(self) -> None:
+        if self._handler_loop is not None:
+            self._handler_loop.set_exception_handler(self._loop_handler)
+            self._handler_loop = self._loop_handler = None
         if self._history_task is not None:
             self._history_task.cancel()
             await asyncio.gather(self._history_task, return_exceptions=True)

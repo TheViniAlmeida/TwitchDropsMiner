@@ -70,6 +70,8 @@ Enable the optional browser panel with `main.py cli run --dashboard`. It listens
 | `--dashboard-readonly` | `TDM_DASHBOARD_READONLY=1` | Off |
 | `--dashboard-token-file [PATH]` | `TDM_DASHBOARD_TOKEN_FILE` | Off (default path when enabled: `TDM_DATA_DIR/dashboard.token`) |
 | — | `TDM_DASHBOARD_TOKEN` | Off |
+| `--dashboard-tls` | `TDM_DASHBOARD_TLS=1` | Off (HTTP) |
+| `--dashboard-cert PATH` + `--dashboard-key PATH` | `TDM_DASHBOARD_CERT` + `TDM_DASHBOARD_KEY` | Self-signed pair in `TDM_DATA_DIR/dashboard-tls` |
 | — | `TDM_DASHBOARD_ORIGINS` | No additional origins |
 
 Authentication is off by default, even outside loopback. A non-loopback bind without a token
@@ -80,6 +82,15 @@ file path, never the token. `GET /api/meta` exposes the auth and readonly settin
 authentication. The browser keeps a supplied token in session storage. Read-only
 mode hides controls and rejects changes. Host and Origin checks protect the API; set
 `TDM_DASHBOARD_ORIGINS` to comma-separated exact origins when a reverse proxy rewrites Host.
+`--dashboard-tls` serves HTTPS so the token and the panel do not cross the network in clear text. Without a
+certificate of your own, `openssl` creates a self-signed pair once in `TDM_DATA_DIR/dashboard-tls`
+(key `0600`) for `localhost`, the host name, its addresses, the local IPs and the hosts in
+`TDM_DASHBOARD_ORIGINS`. Startup prints its SHA-256
+fingerprint: compare it with the one the browser shows on its first warning before accepting it.
+The pair is made again when the host name, the bound host or a local IP is no longer covered, or
+30 days before it expires (it lasts 825 days), so the browser asks once more. A given key must not be readable by other users; on Windows its ACL
+is not checked, so keep it in an owner-only folder. With a full chain, the fingerprint is the first
+(server) certificate's.
 The panel offers Overview (live drop, KPIs and charts), Inventory (campaigns grouped by game,
 filter toggles and expandable drops), Games (priority, exclusions and channel selection),
 Channels (watch controls), Settings and Logs. Search filters the current page. Inventory filters
