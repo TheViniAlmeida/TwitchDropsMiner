@@ -60,7 +60,10 @@ def set_setting(settings: Settings, key: str, raw_value: str) -> str | None:
     value: Any
     if key == "proxy":
         raw_value = raw_value.strip()
-        value = URL(raw_value)
+        try:
+            value = URL(raw_value)
+        except ValueError as exc:
+            raise CommandError("invalid proxy URL") from exc
         if raw_value and (value.host is None or value.port is None):
             raise CommandError("invalid proxy URL")
     elif key == "language":

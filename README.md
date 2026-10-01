@@ -57,6 +57,33 @@ interactive console is disabled; edit settings through the offline commands and 
 process with signals. The packaged Windows executable is windowed and has no console output;
 run this fork from source on Windows when using CLI mode.
 
+#### Dashboard (CLI mode)
+
+Enable the optional browser panel with `main.py cli run --dashboard`. It listens on
+`127.0.0.1:8787` by default; open the URL printed at startup.
+
+| Flag | Environment variable | Default |
+| --- | --- | --- |
+| `--dashboard` | `TDM_DASHBOARD=1` | Off |
+| `--dashboard-host HOST` | `TDM_DASHBOARD_HOST` | `127.0.0.1` |
+| `--dashboard-port PORT` | `TDM_DASHBOARD_PORT` | `8787` |
+| `--dashboard-readonly` | `TDM_DASHBOARD_READONLY=1` | Off |
+| — | `TDM_DASHBOARD_TOKEN` | Optional on loopback; required elsewhere |
+| — | `TDM_DASHBOARD_ORIGINS` | No additional origins |
+
+Outside loopback, the miner generates a token when `TDM_DASHBOARD_TOKEN` is unset and stores it
+in `TDM_DATA_DIR/dashboard.token` with restricted permissions. Startup prints only the token
+file path, never the token. The browser keeps a supplied token in session storage. Read-only
+mode hides controls and rejects changes. Host and Origin checks protect the API; set
+`TDM_DASHBOARD_ORIGINS` to comma-separated exact origins when a reverse proxy rewrites Host.
+The panel reads game filters from `GET /api/priority` and `GET /api/exclude`; changes use the
+matching `POST` routes.
+Authentication failures are limited per client IP, so clients behind one reverse proxy share
+the limit for invalid tokens while valid tokens remain usable. Use TLS at the proxy for remote access.
+
+For nginx, set `TDM_DASHBOARD_ORIGINS=https://your.host` and use
+`location / { proxy_pass http://127.0.0.1:8787; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; }`.
+
 ### Pictures:
 
 ![Main](https://user-images.githubusercontent.com/4180725/164298155-c0880ad7-6423-4419-8d73-f3c053730a1b.png)

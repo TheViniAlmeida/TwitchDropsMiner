@@ -8,26 +8,17 @@ import re
 import shlex
 import sys
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections import abc
 from contextlib import suppress
 from datetime import datetime
 from time import monotonic
-from typing import Any, TYPE_CHECKING, TypeVar
+from typing import Any, TYPE_CHECKING, Callable, TypeVar
+from urllib.parse import unquote
 
-from cli_commands import (
-    CommandError,
-    EDITABLE_KEYS,
-    SETTING_KEYS,
-    exclude_add,
-    exclude_remove,
-    priority_add,
-    priority_move,
-    priority_remove,
-    set_setting,
-    setting_value,
-)
-from constants import OUTPUT_FORMATTER, State
+from cli_actions import Actions, ActionError, ActionRejected
+from cli_commands import CommandError
+from constants import OUTPUT_FORMATTER
 from exceptions import ExitRequest, LoginException
 from progress_timer import ProgressTimer
 from ui_base import LoginData
@@ -44,6 +35,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger("TwitchDrops")
 _T = TypeVar("_T")
 _COUNTER_STATUS = re.compile(r"\((\d+)/(\d+)\)\s*$")
+_DEVICE_CODE_QUERY = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
+
+
+def _redact_device_code_query(match: re.Match[str]) -> str:
+    if unquote(match.group(2)).casefold() == "device-code":
+        return f"{match.group(1)}{match.group(2)}=<redacted>"
+    return match.group(0)
 
 
 class _CLIOutputHandler(logging.Handler):
@@ -65,6 +63,8 @@ class _Status:
         counter = _COUNTER_STATUS.search(text)
         changed = text != self._text
         self._text = text
+        if changed and (notify := getattr(self._manager, "_notify_change", None)) is not None:
+            notify()
         if counter is not None:
             current, total = (int(value) for value in counter.groups())
             now = monotonic()
@@ -119,7 +119,8 @@ class _Login:
 
 
 class _Channels:
-    def __init__(self) -> None:
+    def __init__(self, manager: CLIManager) -> None:
+        self._manager = manager
         self._channels: OrderedDict[int, Channel] = OrderedDict()
         self._watching: int | None = None
         self._selection: Channel | None = None
@@ -127,24 +128,37 @@ class _Channels:
     def display(self, channel: Channel, *, add: bool = False) -> None:
         if add or channel.id in self._channels:
             self._channels[channel.id] = channel
+            self._manager._notify_change()
 
     def remove(self, channel: Channel) -> None:
-        self._channels.pop(channel.id, None)
+        removed = self._channels.pop(channel.id, None)
+        changed = removed is not None or self._watching == channel.id
         if self._watching == channel.id:
             self._watching = None
         if self._selection is channel:
             self._selection = None
+        if changed:
+            self._manager._notify_change()
 
     def clear(self) -> None:
+        changed = bool(self._channels or self._watching is not None or self._selection is not None)
         self._channels.clear()
         self._watching = None
         self._selection = None
+        if changed:
+            self._manager._notify_change()
 
     def set_watching(self, channel: Channel) -> None:
+        changed = self._watching != channel.id
         self._watching = channel.id
+        if changed:
+            self._manager._notify_change()
 
     def clear_watching(self) -> None:
+        changed = self._watching is not None
         self._watching = None
+        if changed:
+            self._manager._notify_change()
 
     def select(self, channel: Channel) -> None:
         if channel.id in self._channels:
@@ -180,25 +194,32 @@ class _Progress:
 
 
 class _Inventory:
-    def __init__(self) -> None:
+    def __init__(self, manager: CLIManager) -> None:
+        self._manager = manager
         self._campaigns: OrderedDict[str, DropsCampaign] = OrderedDict()
         self._drops: dict[str, TimedDrop] = {}
 
     def clear(self) -> None:
+        changed = bool(self._campaigns or self._drops)
         self._campaigns.clear()
         self._drops.clear()
+        if changed:
+            self._manager._notify_change()
 
     async def add_campaign(self, campaign: DropsCampaign) -> None:
         self._campaigns[campaign.id] = campaign
         for drop in campaign.drops:
             self._drops[drop.id] = drop
+        self._manager._notify_change()
 
     def update_drop(self, drop: TimedDrop) -> None:
         self._drops[drop.id] = drop
+        self._manager._notify_change()
 
 
 class _Websockets:
-    def __init__(self) -> None:
+    def __init__(self, manager: CLIManager) -> None:
+        self._manager = manager
         self._states: dict[int, tuple[str | None, int | None]] = {}
 
     def update(self, idx: int, status: str | None = None, topics: int | None = None) -> None:
@@ -212,11 +233,13 @@ class _Websockets:
         if self._states.get(idx) != state:
             self._states[idx] = state
             logger.debug("Websocket %s: status=%s topics=%s", idx, status, topics)
+            self._manager._notify_change()
 
     def remove(self, idx: int) -> None:
         if idx in self._states:
             del self._states[idx]
             logger.debug("Websocket %s removed", idx)
+            self._manager._notify_change()
 
 
 class CLIManager:
@@ -229,13 +252,17 @@ class CLIManager:
         self._last_drop_remaining: int | None = None
         self._games: set[Game] = set()
         self._logged_in = False
+        self._logs: deque[str] = deque(maxlen=1000)
+        self._listeners: set[Callable[[str, Any], None]] = set()
+        self._failed_listeners: set[Callable[[str, Any], None]] = set()
         self.status = _Status(self)
         self.tray = _Tray(self)
         self.login = _Login(self)
-        self.channels = _Channels()
+        self.channels = _Channels(self)
         self.progress = _Progress()
-        self.inv = _Inventory()
-        self.websockets = _Websockets()
+        self.inv = _Inventory(self)
+        self.websockets = _Websockets(self)
+        self.actions = Actions(twitch, self)
         self._handler = _CLIOutputHandler(self)
         self._console_task: asyncio.Task[None] | None = None
         self._console_transport: Any = None
@@ -298,10 +325,16 @@ class CLIManager:
         pass
 
     def set_games(self, games: set[Game]) -> None:
+        changed = self._games != games
         self._games = games
+        if changed:
+            self._notify_change()
 
     def set_logged_in(self, logged_in: bool) -> None:
+        changed = self._logged_in != logged_in
         self._logged_in = logged_in
+        if changed:
+            self._notify_change()
 
     def display_drop(
         self, drop: TimedDrop, *, countdown: bool = True, subone: bool = False
@@ -309,6 +342,7 @@ class CLIManager:
         changed = self._current_drop is None or self._current_drop.id != drop.id
         self._current_drop = drop
         self.progress.display(drop.remaining_minutes, countdown=countdown, subone=subone)
+        self._notify_change()
         remaining = drop.remaining_minutes
         if changed or (remaining % 10 == 0 and remaining != self._last_drop_remaining):
             self.print(
@@ -318,14 +352,52 @@ class CLIManager:
             self._last_drop_remaining = remaining
 
     def clear_drop(self) -> None:
+        changed = self._current_drop is not None
         self._current_drop = None
         self._last_drop_remaining = None
         self.progress.display(None)
+        if changed:
+            self._notify_change()
+
+    def subscribe(self, listener: Callable[[str, Any], None]) -> None:
+        self._listeners.add(listener)
+
+    def unsubscribe(self, listener: Callable[[str, Any], None]) -> None:
+        self._listeners.discard(listener)
+        self._failed_listeners.discard(listener)
+
+    def log_tail(self, count: int = 100) -> list[str]:
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ActionError("tail must be a non-negative integer")
+        return list(self._logs)[-count:] if count else []
+
+    def _notify_change(self) -> None:
+        self._notify("change", None)
+
+    def _notify(self, event: str, data: Any) -> None:
+        if not self._listeners:
+            return
+        for listener in tuple(self._listeners):
+            if listener in self._failed_listeners:
+                continue
+            try:
+                listener(event, data)
+            except Exception:
+                self._failed_listeners.add(listener)
+                logger.error("CLI listener failed; further callbacks suppressed")
 
     def print(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         for line in str(message).splitlines() or [""]:
-            sys.stdout.write(f"{stamp}: {line}\n")
+            output = f"{stamp}: {line}"
+            sys.stdout.write(f"{output}\n")
+            recorded = (
+                f"{stamp}: Enter this code: <redacted>"
+                if line.startswith("Enter this code: ")
+                else _DEVICE_CODE_QUERY.sub(_redact_device_code_query, output)
+            )
+            self._logs.append(recorded)
+            self._notify("log", recorded)
         sys.stdout.flush()
 
     def _stop_console(self) -> None:
@@ -402,17 +474,7 @@ class CLIManager:
             await self.dispatch_command(line.strip())
 
     def _reload_inventory(self) -> None:
-        self._twitch.state_change(State.INVENTORY_FETCH)()
-
-    def _watched_channel(self) -> Channel | None:
-        if self.channels._watching is None:
-            return None
-        channels = getattr(self._twitch, "channels", self.channels._channels)
-        return channels.get(self.channels._watching)
-
-    def _channel_values(self) -> abc.Iterable[Channel]:
-        channels = getattr(self._twitch, "channels", self.channels._channels)
-        return channels.values()
+        self.actions.reload()
 
     async def dispatch_command(self, line: str) -> None:
         if not line:
@@ -485,140 +547,107 @@ class CLIManager:
             raise CommandError("unexpected argument")
 
     def _command_status(self) -> None:
-        state = getattr(self._twitch, "_state", None)
-        self.print(f"state: {state.name.lower() if state is not None else 'unknown'}")
-        watched = self._watched_channel()
-        self.print(f"watched channel: {watched.name if watched is not None else '-'}")
-        if self._current_drop is None:
+        state = self.actions.state()
+        self.print(f"state: {state['state']}")
+        self.print(f"watched channel: {state['watched_channel'] or '-'}")
+        drop = state["current_drop"]
+        if drop is None:
             self.print("current drop: -")
         else:
-            drop = self._current_drop
             self.print(
-                f"current drop: {drop.campaign.game.name} | {drop.rewards_text()} | "
-                f"{drop.progress:.1%} | {drop.remaining_minutes} min, {self.progress.seconds}s"
+                f"current drop: {drop['game']} | {drop['reward']} | "
+                f"{drop['progress']:.1%} | {drop['remaining_minutes']} min, "
+                f"{drop['timer_seconds']}s"
             )
-        websocket_pool = getattr(self._twitch, "websocket", None)
-        if websocket_pool is not None:
-            sockets = websocket_pool.websockets
-            connected = sum(socket.connected for socket in sockets)
-            total = len(sockets)
-        else:
-            states = self.websockets._states.values()
-            connected = sum(
-                status is not None and status.casefold() == "connected" for status, _ in states
-            )
-            total = len(self.websockets._states)
-        self.print(f"websockets: {connected}/{total} connected")
-        self.print(f"logged in: {'yes' if self._logged_in else 'no'}")
+        self.print(f"websockets: {state['websockets']['connected']}/{state['websockets']['total']} connected")
+        self.print(f"logged in: {'yes' if state['logged_in'] else 'no'}")
 
     def _command_channels(self) -> None:
         self.print("* name | state | game | viewers | drops-enabled | ACL-based")
-        for channel in self._channel_values():
-            marker = "*" if channel.id == self.channels._watching else " "
-            game = channel.game.name if channel.game is not None else "-"
-            viewers = str(channel.viewers) if channel.viewers is not None else "-"
+        for channel in self.actions.channels():
+            marker = "*" if channel["watching"] else " "
+            game = channel["game"] or "-"
+            viewers = str(channel["viewers"]) if channel["viewers"] is not None else "-"
             self.print(
-                f"{marker} {channel.name} | {'online' if channel.online else 'offline'} | {game} | "
-                f"{viewers} | {'yes' if channel.drops_enabled else 'no'} | "
-                f"{'yes' if channel.acl_based else 'no'}"
+                f"{marker} {channel['name']} | {'online' if channel['online'] else 'offline'} | {game} | "
+                f"{viewers} | {'yes' if channel['drops_enabled'] else 'no'} | "
+                f"{'yes' if channel['acl_based'] else 'no'}"
             )
 
     def _command_switch(self, values: list[str]) -> None:
         if len(values) != 1:
             raise CommandError("usage: switch <channel>")
-        wanted = values[0].casefold()
-        channel = next((item for item in self._channel_values() if item.name.casefold() == wanted), None)
-        if channel is None:
-            raise CommandError(f"channel not found: {values[0]}")
-        self.channels.select(channel)
-        self._twitch.state_change(State.CHANNEL_SWITCH)()
+        self.actions.switch(values[0])
 
     def _command_inventory(self, values: list[str]) -> None:
         if values not in ([], ["all"]):
             raise CommandError("usage: inventory [all]")
-        show_all = bool(values)
         self.print("game | name | progress | claimed/total | ends at")
-        for campaign in self.inv._campaigns.values():
-            if not show_all and (campaign.finished or campaign.expired):
-                continue
-            ends_at = campaign.ends_at.astimezone().replace(microsecond=0).isoformat(sep=" ")
+        for campaign in self.actions.inventory(all=bool(values)):
+            ends_at = datetime.fromisoformat(campaign["ends_at"]).astimezone().replace(
+                microsecond=0
+            ).isoformat(sep=" ")
             self.print(
-                f"{campaign.game.name} | {campaign.name} | {campaign.progress:.1%} | "
-                f"{campaign.claimed_drops}/{campaign.total_drops} | {ends_at}"
+                f"{campaign['game']} | {campaign['name']} | {campaign['progress']:.1%} | "
+                f"{campaign['claimed_drops']}/{campaign['total_drops']} | {ends_at}"
             )
 
     def _command_games(self) -> None:
-        for game in sorted((game.name for game in self._games), key=str.casefold):
+        for game in self.actions.games():
             self.print(game)
 
     def _command_priority(self, values: list[str]) -> None:
         if not values:
             raise CommandError("usage: priority list|add|remove|move")
         action = values[0].casefold()
-        settings = self._twitch.settings
         if action == "list" and len(values) == 1:
-            for index, game in enumerate(settings.priority, 1):
+            for index, game in enumerate(self.actions.priority("list")["priority"], 1):
                 self.print(f"{index}. {game}")
             return
         if action == "add" and len(values) == 2:
-            changed = priority_add(settings, values[1])
+            self.actions.priority(action, values[1])
         elif action == "remove" and len(values) == 2:
-            changed = priority_remove(settings, values[1])
+            self.actions.priority(action, values[1])
         elif action == "move" and len(values) == 3:
-            changed = priority_move(settings, values[1], values[2])
+            self.actions.priority(action, values[1], values[2])
         else:
             raise CommandError("usage: priority list|add <game>|remove <game>|move <game> <pos>")
-        if changed:
-            self._reload_inventory()
 
     def _command_exclude(self, values: list[str]) -> None:
         if not values:
             raise CommandError("usage: exclude list|add|remove")
         action = values[0].casefold()
-        settings = self._twitch.settings
         if action == "list" and len(values) == 1:
-            for game in sorted(settings.exclude, key=str.casefold):
+            for game in self.actions.exclude("list")["exclude"]:
                 self.print(game)
             return
         if action == "add" and len(values) == 2:
-            changed = exclude_add(settings, values[1])
+            self.actions.exclude(action, values[1])
         elif action == "remove" and len(values) == 2:
-            changed = exclude_remove(settings, values[1])
+            self.actions.exclude(action, values[1])
         else:
             raise CommandError("usage: exclude list|add <game>|remove <game>")
-        if changed:
-            self._reload_inventory()
 
     def _command_get(self, values: list[str]) -> None:
         if len(values) > 1:
             raise CommandError("usage: get [key]")
-        settings = self._twitch.settings
         if values:
-            self.print(f"{values[0]} = {setting_value(settings, values[0])}")
+            self.print(f"{values[0]} = {self.actions.get_setting(values[0])}")
             return
-        for key in SETTING_KEYS:
-            self.print(f"{key} = {setting_value(settings, key)}")
+        for key, value in self.actions.settings(include_gui_only=True).items():
+            self.print(f"{key} = {value}")
 
     def _command_set(self, values: list[str]) -> None:
         if len(values) < 2:
             raise CommandError("usage: set <key> <value>")
-        warning = set_setting(self._twitch.settings, values[0], " ".join(values[1:]))
+        warning = self.actions.set_setting(values[0], " ".join(values[1:]))["warning"]
         if warning:
             self.print(warning)
 
     async def _logout(self) -> None:
-        auth_state = await self._twitch.get_auth()
-        async with self._twitch.request(
-            "POST",
-            "https://id.twitch.tv/oauth2/revoke",
-            data={
-                "client_id": self._twitch._client_type.CLIENT_ID,
-                "token": auth_state.access_token,
-            },
-        ) as response:
-            if response.status == 200:
-                auth_state.invalidate(delete_cookies=True)
-                self.print("logged out")
-            else:
-                self.print(f"error: logout failed (HTTP {response.status})")
-        self._twitch.change_state(State.RESTART)
+        try:
+            await self.actions.logout()
+        except ActionRejected as exc:
+            self.print(f"error: {exc}")
+        else:
+            self.print("logged out")
