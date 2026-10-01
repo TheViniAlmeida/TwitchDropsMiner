@@ -15,8 +15,7 @@ if __name__ == "__main__":
     import argparse
     import warnings
     import traceback
-    import tkinter as tk
-    from tkinter import messagebox
+    from contextlib import suppress
     from typing import NoReturn, TYPE_CHECKING
 
     import truststore
@@ -68,6 +67,7 @@ if __name__ == "__main__":
         log: bool
         tray: bool
         dump: bool
+        open_browser: bool
 
         # TODO: replace int with union of literal values once typeshed updates
         @property
@@ -96,43 +96,112 @@ if __name__ == "__main__":
             return logging.NOTSET
 
     # handle input parameters
-    # NOTE: parser output is shown via message box
-    # we also need a dummy invisible window for the parser
-    root = tk.Tk()
-    root.overrideredirect(True)
-    root.withdraw()
-    set_root_icon(root, resource_path("icons/pickaxe.ico"))
-    root.update()
-    parser = Parser(
-        SELF_PATH.name,
-        description="A program that allows you to mine timed drops on Twitch.",
-    )
-    parser.add_argument("--version", action="version", version=f"v{__version__}")
-    parser.add_argument("-v", dest="_verbose", action="count", default=0)
-    parser.add_argument("--tray", action="store_true")
-    parser.add_argument("--log", action="store_true")
-    parser.add_argument("--dump", action="store_true")
-    # undocumented debug args
-    parser.add_argument(
-        "--debug-ws", dest="_debug_ws", action="store_true", help=argparse.SUPPRESS
-    )
-    parser.add_argument(
-        "--debug-gql", dest="_debug_gql", action="store_true", help=argparse.SUPPRESS
-    )
-    args = parser.parse_args(namespace=ParsedArgs())
+    # This check must happen before importing tkinter, so the CLI has no GUI dependency.
+    cli_mode = len(sys.argv) > 1 and "cli" in sys.argv[1:]
+    if cli_mode:
+        from cli import CLIManager
+
+        parser = argparse.ArgumentParser(
+            SELF_PATH.name,
+            description="A program that allows you to mine timed drops on Twitch.",
+        )
+        parser.add_argument("--version", action="version", version=f"v{__version__}")
+        parser.add_argument("-v", dest="_verbose", action="count", default=0)
+        parser.add_argument("--tray", action="store_true")
+        parser.add_argument("--log", action="store_true")
+        parser.add_argument("--dump", action="store_true")
+        # undocumented debug args
+        parser.add_argument(
+            "--debug-ws", dest="_debug_ws", action="store_true", help=argparse.SUPPRESS
+        )
+        parser.add_argument(
+            "--debug-gql", dest="_debug_gql", action="store_true", help=argparse.SUPPRESS
+        )
+        subparsers = parser.add_subparsers(dest="mode")
+        cli_parser = subparsers.add_parser("cli")
+        cli_subparsers = cli_parser.add_subparsers(dest="command")
+        run_parser = cli_subparsers.add_parser("run")
+        run_parser.add_argument("--open-browser", action="store_true")
+        settings_parser = cli_subparsers.add_parser("settings")
+        settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
+        settings_subparsers.add_parser("show")
+        settings_get_parser = settings_subparsers.add_parser("get")
+        settings_get_parser.add_argument("key")
+        settings_set_parser = settings_subparsers.add_parser("set")
+        settings_set_parser.add_argument("key")
+        settings_set_parser.add_argument("value")
+        priority_parser = cli_subparsers.add_parser("priority")
+        priority_subparsers = priority_parser.add_subparsers(dest="priority_command", required=True)
+        priority_subparsers.add_parser("list")
+        for action in ("add", "remove"):
+            action_parser = priority_subparsers.add_parser(action)
+            action_parser.add_argument("game")
+        priority_move_parser = priority_subparsers.add_parser("move")
+        priority_move_parser.add_argument("game")
+        priority_move_parser.add_argument("position")
+        exclude_parser = cli_subparsers.add_parser("exclude")
+        exclude_subparsers = exclude_parser.add_subparsers(dest="exclude_command", required=True)
+        exclude_subparsers.add_parser("list")
+        for action in ("add", "remove"):
+            action_parser = exclude_subparsers.add_parser(action)
+            action_parser.add_argument("game")
+        logout_parser = cli_subparsers.add_parser("logout")
+        logout_parser.add_argument("--yes", action="store_true")
+        args = parser.parse_args(namespace=ParsedArgs())
+        if args.mode == "cli" and args.command is None:
+            cli_parser.print_help()
+            parser.exit(2)
+        if args.command in ("settings", "priority", "exclude", "logout"):
+            from cli_commands import run_offline
+
+            sys.exit(run_offline(args))
+    else:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        # NOTE: parser output is shown via message box
+        # we also need a dummy invisible window for the parser
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.withdraw()
+        set_root_icon(root, resource_path("icons/pickaxe.ico"))
+        root.update()
+        parser = Parser(
+            SELF_PATH.name,
+            description="A program that allows you to mine timed drops on Twitch.",
+        )
+        parser.add_argument("--version", action="version", version=f"v{__version__}")
+        parser.add_argument("-v", dest="_verbose", action="count", default=0)
+        parser.add_argument("--tray", action="store_true")
+        parser.add_argument("--log", action="store_true")
+        parser.add_argument("--dump", action="store_true")
+        # undocumented debug args
+        parser.add_argument(
+            "--debug-ws", dest="_debug_ws", action="store_true", help=argparse.SUPPRESS
+        )
+        parser.add_argument(
+            "--debug-gql", dest="_debug_gql", action="store_true", help=argparse.SUPPRESS
+        )
+        args = parser.parse_args(namespace=ParsedArgs())
+        args.open_browser = False
+
     # load settings
     try:
         settings = Settings(args)
     except Exception:
-        messagebox.showerror(
-            "Settings error",
-            f"There was an error while loading the settings file:\n\n{traceback.format_exc()}"
-        )
+        if cli_mode:
+            traceback.print_exc()
+        else:
+            messagebox.showerror(
+                "Settings error",
+                f"There was an error while loading the settings file:\n\n{traceback.format_exc()}",
+            )
         sys.exit(4)
-    # dummy window isn't needed anymore
-    root.destroy()
-    # get rid of unneeded objects
-    del root, parser
+    if not cli_mode:
+        # dummy window isn't needed anymore
+        root.destroy()
+        # get rid of unneeded objects
+        del root, parser
 
     # client run
     async def main():
@@ -158,13 +227,28 @@ if __name__ == "__main__":
         logging.getLogger("TwitchDrops.websocket").setLevel(settings.debug_ws)
 
         exit_status = 0
-        client = Twitch(settings)
+        if cli_mode:
+            client = Twitch(
+                settings,
+                ui_factory=lambda twitch: CLIManager(twitch, open_browser=args.open_browser),
+            )
+            logger.info("CLI mode started")
+        else:
+            client = Twitch(settings)
         loop = asyncio.get_running_loop()
-        if sys.platform == "linux":
+        if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
             loop.add_signal_handler(signal.SIGINT, lambda *_: client.gui.close())
             loop.add_signal_handler(signal.SIGTERM, lambda *_: client.gui.close())
+        elif cli_mode and sys.platform == "win32":
+            previous_sigint = signal.getsignal(signal.SIGINT)
+            signal.signal(
+                signal.SIGINT,
+                lambda *_: loop.call_soon_threadsafe(client.gui.close),
+            )
         try:
             await client.run()
+            if cli_mode and not client.gui.close_requested:
+                exit_status = 1
         except CaptchaRequired:
             exit_status = 1
             client.prevent_close()
@@ -175,15 +259,33 @@ if __name__ == "__main__":
             client.print("Fatal error encountered:\n")
             client.print(traceback.format_exc())
         finally:
-            if sys.platform == "linux":
+            if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
                 loop.remove_signal_handler(signal.SIGINT)
                 loop.remove_signal_handler(signal.SIGTERM)
+            elif cli_mode and sys.platform == "win32":
+                signal.signal(signal.SIGINT, previous_sigint)
             client.print(_("gui", "status", "exiting"))
-            await client.shutdown()
+            if cli_mode:
+                try:
+                    await asyncio.wait_for(client.shutdown(), timeout=10)
+                except asyncio.TimeoutError:
+                    client.print("Shutdown timed out.")
+                    try:
+                        if client._session is not None:
+                            from constants import COOKIES_PATH
+
+                            client._session.cookie_jar.save(COOKIES_PATH)
+                    except Exception:
+                        logger.exception("Failed to save cookies after shutdown timeout")
+            else:
+                await client.shutdown()
         if not client.gui.close_requested:
             # user didn't request the closure
             client.gui.tray.change_icon("error")
-            client.print(_("status", "terminated"))
+            if cli_mode:
+                client.print(_("status", "terminated").splitlines()[0])
+            else:
+                client.print(_("status", "terminated"))
             client.gui.status.update(_("gui", "status", "terminated"))
             # notify the user about the closure
             client.gui.grab_attention(sound=True)
@@ -196,13 +298,51 @@ if __name__ == "__main__":
         client.gui.close_window()
         sys.exit(exit_status)
 
+    file = None
+    cli_exit_status = 0
     try:
         # use lock_file to check if we're not already running
         success, file = lock_file(LOCK_PATH)
         if not success:
             # already running - exit
-            sys.exit(3)
+            if cli_mode:
+                cli_exit_status = 3
+            else:
+                sys.exit(3)
 
-        asyncio.run(main())
+        if cli_mode:
+            if cli_exit_status == 0:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                task = loop.create_task(main())
+                try:
+                    loop.run_until_complete(task)
+                except KeyboardInterrupt:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        loop.run_until_complete(task)
+                    cli_exit_status = 0
+                except SystemExit as exc:
+                    cli_exit_status = int(exc.code or 0)
+                finally:
+                    pending = asyncio.all_tasks(loop)
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                    loop.close()
+        else:
+            asyncio.run(main())
     finally:
-        file.close()
+        if file is not None:
+            file.close()
+    if cli_mode:
+        # DNS resolution can outlive an interrupted aiohttp request. Its executor would make
+        # asyncio.run wait during interpreter shutdown even after the client has closed.
+        with suppress(Exception):
+            logging.shutdown()
+        with suppress(Exception):
+            sys.stdout.flush()
+        with suppress(Exception):
+            sys.stderr.flush()
+        os._exit(cli_exit_status)

@@ -25,6 +25,38 @@ Every several seconds, the application pretends to watch a particular stream by 
 - If you wish to keep the miner occupied with mining anything it can, beyond what you've selected via the Priority List, you can use the Priority Mode setting to specify the mining order for the rest of the games.
 - Make sure to link your Twitch account to game accounts on the [campaigns page](https://www.twitch.tv/drops/campaigns), to enable more games to be mined.
 
+### CLI mode (this fork)
+
+This fork can run the miner without Tk, a display server, or the tray UI. From a source checkout:
+
+```sh
+TDM_DATA_DIR=/var/lib/twitch-drops .venv/bin/python main.py cli run
+```
+
+`TDM_DATA_DIR` selects the directory for `settings.json`, `cookies.jar`, logs, and the lock file.
+To reuse an existing login, create the directory with restricted permissions, copy the existing
+`cookies.jar` into it, and protect it: `chmod 600 /var/lib/twitch-drops/cookies.jar`.
+
+When stdin is a TTY, `cli run` accepts these console commands:
+
+| Command | Action |
+| --- | --- |
+| `help`, `status`, `channels`, `games`, `inventory [all]` | Show CLI state. |
+| `switch <channel>`, `reload` | Switch the watched channel or reload inventory. |
+| `priority list\|add\|remove\|move ...`, `exclude list\|add\|remove ...` | Edit game filters. |
+| `get [key]`, `set <key> <value>` | View or edit settings. |
+| `logout`, `quit` / `exit` | Remove the login after confirmation, or stop cleanly. |
+
+Offline commands do not run the miner: `cli settings show|get|set ...`, `cli priority
+list|add|remove|move ...`, `cli exclude list|add|remove ...`, and `cli logout --yes`.
+Exit codes are `0` success, `1` fatal error, `2` argument or command error, `3` miner already
+running, and `4` settings error.
+
+Use `systemd` or `nohup` with `cli run` for unattended execution. They have no TTY, so the
+interactive console is disabled; edit settings through the offline commands and control the
+process with signals. The packaged Windows executable is windowed and has no console output;
+run this fork from source on Windows when using CLI mode.
+
 ### Pictures:
 
 ![Main](https://user-images.githubusercontent.com/4180725/164298155-c0880ad7-6423-4419-8d73-f3c053730a1b.png)

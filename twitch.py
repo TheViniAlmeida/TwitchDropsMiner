@@ -16,7 +16,6 @@ import aiohttp
 from yarl import URL
 
 from translate import _
-from gui import GUIManager
 from channel import Channel
 from websocket import WebsocketPool
 from inventory import DropsCampaign
@@ -56,7 +55,7 @@ from constants import (
 
 if TYPE_CHECKING:
     from utils import Game
-    from gui import LoginForm
+    from ui_base import LoginForm, UIManager
     from channel import Stream
     from settings import Settings
     from inventory import TimedDrop
@@ -65,6 +64,36 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("TwitchDrops")
 gql_logger = logging.getLogger("TwitchDrops.gql")
+
+
+def _redacted_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a log-safe copy without changing the actual request arguments."""
+    sensitive_headers = {"authorization", "client-integrity", "cookie", "x-device-id"}
+    sensitive_fields = {
+        "token", "access_token", "refresh_token", "device_code",
+        "password", "client_secret", "auth-token",
+    }
+    redacted = kwargs.copy()
+    for name, value in kwargs.items():
+        if name == "headers" and isinstance(value, abc.Mapping):
+            redacted[name] = {
+                key: "<redacted>" if str(key).casefold() in sensitive_headers else item
+                for key, item in value.items()
+            }
+        elif name in ("data", "json", "params") and isinstance(value, abc.Mapping):
+            redacted[name] = {
+                key: "<redacted>" if str(key).casefold() in sensitive_fields else item
+                for key, item in value.items()
+            }
+        elif name == "proxy" and value:
+            proxy = URL(value)
+            if proxy.password is not None:
+                redacted[name] = str(proxy.with_password("***"))
+        elif name in ("auth", "proxy_auth") and value is not None:
+            redacted[name] = "<redacted>"
+        elif name == "cookies":
+            redacted[name] = "<redacted>"
+    return redacted
 
 
 class SkipExtraJsonDecoder(json.JSONDecoder):
@@ -99,7 +128,7 @@ class _AuthState:
     def invalidate(self, *, delete_cookies: bool = False) -> None:
         self._delattrs("access_token", "user_id")
         self._logged_in.clear()
-        self._twitch.gui.help._invalidate_button.config(state="disabled")
+        self._twitch.gui.set_logged_in(False)
         if delete_cookies:
             session = self._twitch._session
             if session is not None:
@@ -116,7 +145,7 @@ class _AuthState:
             "client_version",
         )
         self._logged_in.clear()
-        self._twitch.gui.help._invalidate_button.config(state="disabled")
+        self._twitch.gui.set_logged_in(False)
 
     async def _oauth_login(self) -> str:
         login_form: LoginForm = self._twitch.gui.login
@@ -426,12 +455,17 @@ class _AuthState:
             # update our cookie and save it
             jar.update_cookies(cookie, client_info.CLIENT_URL)
             jar.save(COOKIES_PATH)
-        self._twitch.gui.help._invalidate_button.config(state="normal")
+        self._twitch.gui.set_logged_in(True)
         self._logged_in.set()
 
 
 class Twitch:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        ui_factory: abc.Callable[[Twitch], UIManager] | None = None,
+    ):
         self.settings: Settings = settings
         # State management
         self._state: State = State.IDLE
@@ -449,7 +483,10 @@ class Twitch:
         self._session: aiohttp.ClientSession | None = None
         self._auth_state: _AuthState = _AuthState(self)
         # GUI
-        self.gui = GUIManager(self)
+        if ui_factory is None:
+            from gui import GUIManager
+            ui_factory = GUIManager
+        self.gui: UIManager = ui_factory(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
         self.watching_channel: AwaitableValue[Channel] = AwaitableValue()
@@ -1244,7 +1281,7 @@ class Twitch:
         method = method.upper()
         if self.settings.proxy and "proxy" not in kwargs:
             kwargs["proxy"] = self.settings.proxy
-        logger.debug(f"Request: ({method=}, {url=}, {kwargs=})")
+        logger.debug(f"Request: ({method=}, {url=}, kwargs={_redacted_request_kwargs(kwargs)!r})")
         session_timeout = timedelta(seconds=session.timeout.total or 0)
         backoff = ExponentialBackoff(maximum=3*60)
         for delay in backoff:
@@ -1262,7 +1299,7 @@ class Twitch:
                     session.request(method, url, **kwargs)
                 )
                 assert response is not None
-                logger.debug(f"Response: {response.status}: {response}")
+                logger.debug("Response status: %s", response.status)
                 if response.status < 500:
                     # pre-read the response to avoid getting errors outside of the context manager
                     raw_response = await response.read()  # noqa
