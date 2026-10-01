@@ -55,6 +55,15 @@ class HistoryFileTests(unittest.TestCase):
         self.assertLess(second.history[0]["t"], second.history[1]["t"])
         self.assertEqual(self.lines(), list(second.history))
 
+    def test_save_is_flushed_to_disk_before_the_rename(self) -> None:
+        calls = []
+        real_fsync, real_replace = os.fsync, os.replace
+        with patch("private_file.os.fsync", side_effect=lambda fd: (calls.append("fsync"), real_fsync(fd))), \
+                patch("private_file.os.replace", side_effect=lambda a, b: (calls.append("replace"), real_replace(a, b))):
+            self.record(self.dashboard())
+        expected = ["fsync", "replace"] + ([] if sys.platform == "win32" else ["fsync"])
+        self.assertEqual(calls, expected)
+
     def test_owner_only_file(self) -> None:
         if sys.platform == "win32":
             self.skipTest("POSIX mode bits")

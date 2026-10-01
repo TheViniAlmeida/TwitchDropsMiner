@@ -503,7 +503,9 @@ class Dashboard:
             # off the event loop: on Windows each save also waits for whoami and icacls
             self._history_write = asyncio.ensure_future(
                 asyncio.to_thread(self._write_history, self._history_text()))
-            # a cancelled sampler leaves the write running: stop() waits for it
+            # a cancelled sampler leaves the write running: stop() waits for it. If the CLI's
+            # shutdown deadline ends the process first, the rename never happens and the
+            # previous file stays whole: at most this one sample is lost
             await asyncio.shield(self._history_write)
 
     def _history_warning(self, what: str, exc: BaseException) -> None:

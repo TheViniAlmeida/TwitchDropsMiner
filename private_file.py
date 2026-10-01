@@ -53,6 +53,21 @@ def rewrite_private(path: Path, content: str) -> None:
             raise
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             output.write(content)
+            # on disk before the rename: a power cut must not leave the new name empty
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _sync_directory(directory: Path) -> None:
+    # the rename itself lives in the directory; Windows cannot open a directory for this
+    if WINDOWS:
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
