@@ -74,7 +74,7 @@ def run_control_client(args: Any) -> int:
         await writer.wait_closed()
 
     def confirm_logout(words: list[str]) -> bool:
-        if not words or words[0] != "logout":
+        if not _is_logout(words):
             return True
         if not logout_allowed():
             # gate here too: an older miner on the other end may not refuse the logout itself
@@ -92,7 +92,7 @@ def run_control_client(args: Any) -> int:
         if args.words:
             if not confirm_logout(args.words):
                 return 2
-            return asyncio.run(send_command(DATA_DIR, quote_command(args.words), confirm=args.y or args.words[0] == "logout"))
+            return asyncio.run(send_command(DATA_DIR, quote_command(args.words), confirm=args.y or _is_logout(args.words)))
         while True:
             try:
                 line = input("ctl> ")
@@ -111,13 +111,18 @@ def run_control_client(args: Any) -> int:
                 continue
             if not confirm_logout(words):
                 continue
-            asyncio.run(send_command(DATA_DIR, line, confirm=bool(words and words[0] == "logout")))
+            asyncio.run(send_command(DATA_DIR, line, confirm=_is_logout(words)))
     except ControlUnavailable as exc:
         print(str(exc), file=sys.stderr)
         return 3
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return 130
+
+
+def _is_logout(words: list[str]) -> bool:
+    # match the miner, which reads command names case-insensitively
+    return bool(words) and words[0].casefold() == "logout"
 
 
 def _forward_offline(args: Any) -> int:

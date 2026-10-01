@@ -316,6 +316,17 @@ class AuthCommandTests(unittest.TestCase):
         send.assert_not_awaited()
         self.assertIn("logout disabled", self.errors.getvalue())
 
+    def test_ctl_logout_any_case_is_refused_before_reaching_the_miner(self) -> None:
+        for words in (["logout"], ["LOGOUT"], ["LogOut"]):
+            args = SimpleNamespace(command="ctl", y=True, words=words)
+            with patch("control.open_control", new_callable=AsyncMock) as open_control, \
+                    patch("control.send_command", new_callable=AsyncMock) as send, \
+                    patch.dict(os.environ, {}, clear=False):
+                open_control.return_value = (Mock(), Mock(close=Mock(), wait_closed=AsyncMock()))
+                os.environ.pop("TDM_ALLOW_LOGOUT", None)
+                self.assertEqual(cli_commands.run_control_client(args), 2, words)
+            send.assert_not_awaited()
+
     def test_backup_restore_commands_and_lock(self) -> None:
         self.assertEqual(self.run_auth("backup"), 2)
         auth_session.write_session("original", "1", ClientType.ANDROID_APP, self.path)
