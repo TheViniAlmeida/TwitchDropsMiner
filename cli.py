@@ -11,12 +11,13 @@ import threading
 from collections import OrderedDict, deque
 from collections import abc
 from contextlib import suppress
+from dataclasses import fields, replace
 from datetime import datetime
 from time import monotonic
 from typing import Any, TYPE_CHECKING, Callable, TypeVar
 from urllib.parse import unquote
 
-from cli_actions import Actions, ActionError, ActionRejected
+from cli_actions import Actions, ActionError, ActionRejected, CampaignFilters
 from cli_commands import CommandError
 from constants import OUTPUT_FORMATTER
 from exceptions import ExitRequest, LoginException
@@ -271,6 +272,8 @@ class CLIManager:
         self._stdin_fd: int | None = None
         self._stdin_blocking: bool | None = None
         self._logout_confirmation = False
+        self._campaign_filters = CampaignFilters()
+        self._watch_task: asyncio.Task[None] | None = None
         self._handler.setFormatter(OUTPUT_FORMATTER)
         logger.addHandler(self._handler)
         if (logging_level := logger.getEffectiveLevel()) < logging.ERROR:
@@ -402,6 +405,7 @@ class CLIManager:
 
     def _stop_console(self) -> None:
         self._console_stop.set()
+        self._cancel_watch()
         self._restore_stdin_blocking()
         if self._console_transport is not None:
             self._console_transport.close()
@@ -428,6 +432,8 @@ class CLIManager:
             raise
         except Exception as exc:
             self.print(f"console error: {exc}")
+        finally:
+            self._cancel_watch()
 
     async def _posix_console_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -477,6 +483,7 @@ class CLIManager:
         self.actions.reload()
 
     async def dispatch_command(self, line: str) -> None:
+        self._cancel_watch()
         if not line:
             return
         if self._logout_confirmation:
@@ -504,7 +511,10 @@ class CLIManager:
             if command == "help":
                 self.print(
                     "commands: help, status, channels, switch <channel>, inventory [all], games, "
-                    "reload, priority, exclude, get [key], set <key> <value>, logout, quit"
+                    "reload, priority, exclude, get [key], set <key> <value>, logout, quit; "
+                    "campaigns [--all] [--filter k=v ...] [game], drops <campaign|game>, "
+                    "game <name>, games --names, progress, watch [seconds], "
+                    "filters [k=on|off ...], settings"
                 )
             elif command == "status":
                 self._command_status()
@@ -515,7 +525,23 @@ class CLIManager:
             elif command == "inventory":
                 self._command_inventory(parts[1:])
             elif command == "games":
-                self._command_games()
+                self._command_games(parts[1:])
+            elif command == "campaigns":
+                self._command_campaigns(parts[1:])
+            elif command == "drops":
+                self._command_drops(parts[1:])
+            elif command == "game":
+                self._command_game(parts[1:])
+            elif command == "progress":
+                self._require_no_extra(parts[1:])
+                self._command_progress()
+            elif command == "watch":
+                self._command_watch(parts[1:])
+            elif command == "filters":
+                self._command_filters(parts[1:])
+            elif command == "settings":
+                self._require_no_extra(parts[1:])
+                self._command_settings()
             elif command == "reload":
                 self._require_no_extra(parts[1:])
                 self._reload_inventory()
@@ -592,9 +618,128 @@ class CLIManager:
                 f"{campaign['claimed_drops']}/{campaign['total_drops']} | {ends_at}"
             )
 
-    def _command_games(self) -> None:
+    def _command_games(self, values: list[str] | None = None) -> None:
+        if values == ["--names"]:
+            for game in self.actions.game_names():
+                self.print(game)
+            return
+        self._require_no_extra(values or [])
+        self.print("game | status | priority | excluded | campaigns active/upcoming | drops claimed/total | online")
         for game in self.actions.games():
-            self.print(game)
+            self.print(
+                f"{game['name']} | {game['status']} | {game['priority_pos'] or '-'} | "
+                f"{'yes' if game['excluded'] else 'no'} | "
+                f"{game['active_campaigns']}/{game['upcoming_campaigns']} | "
+                f"{game['claimed_drops']}/{game['total_drops']} | "
+                f"{len(game['online_channels'])}"
+            )
+
+    @staticmethod
+    def _filter_changes(values: list[str]) -> dict[str, bool]:
+        allowed = {field.name for field in fields(CampaignFilters)}
+        changes = {}
+        for entry in values:
+            key, separator, value = entry.partition("=")
+            if not separator or key not in allowed or value.casefold() not in ("on", "off"):
+                raise CommandError(f"invalid filter: {entry} (use k=on|off)")
+            changes[key] = value.casefold() == "on"
+        return changes
+
+    def _command_campaigns(self, values: list[str]) -> None:
+        include_all = False
+        changes: list[str] = []
+        game = None
+        remaining = iter(values)
+        for value in remaining:
+            if value == "--all":
+                include_all = True
+            elif value == "--filter":
+                try:
+                    changes.append(next(remaining))
+                except StopIteration as exc:
+                    raise CommandError("usage: campaigns [--all] [--filter k=v ...] [game]") from exc
+            elif value.startswith("--") or game is not None:
+                raise CommandError("usage: campaigns [--all] [--filter k=v ...] [game]")
+            else:
+                game = value
+        selected = replace(self._campaign_filters, **self._filter_changes(changes))
+        self.print("game | campaign | status | linked | progress | claimed/total | ends at | link")
+        for campaign in self.actions.campaigns(selected, game=game, include_all=include_all):
+            self.print(
+                f"{campaign['game']} | {campaign['name']} | {campaign['status']} | "
+                f"{'yes' if campaign['linked'] else 'no'} | {campaign['progress']:.1%} | "
+                f"{campaign['claimed_drops']}/{campaign['total_drops']} | "
+                f"{campaign['ends_at']} | {campaign['link_url'] or '-'}"
+            )
+
+    def _command_drops(self, values: list[str]) -> None:
+        if len(values) != 1:
+            raise CommandError("usage: drops <campaign|game>")
+        drops = self.actions.drops(values[0])
+        self.print("game | campaign | drop | status | minutes current/required/remaining | progress")
+        for drop in drops:
+            self.print(
+                f"{drop['game']} | {drop['campaign']} | {drop['name']} | {drop['status']} | "
+                f"{drop['current_minutes']}/{drop['required_minutes']}/"
+                f"{drop['remaining_minutes']} | {drop['progress']:.1%}"
+            )
+
+    def _command_game(self, values: list[str]) -> None:
+        if len(values) != 1:
+            raise CommandError("usage: game <name>")
+        game = self.actions.game(values[0])
+        self.print(f"game: {game['name']} | {game['status']}")
+        self.print(f"priority: {game['priority_pos'] or '-'} | excluded: {'yes' if game['excluded'] else 'no'}")
+        self.print(f"campaigns: {', '.join(campaign['name'] for campaign in game['campaigns']) or '-'}")
+        self.print(f"online channels: {', '.join(channel['name'] for channel in game['online_channels']) or '-'}")
+
+    def _command_progress(self) -> None:
+        drop = self.actions.progress()
+        if drop is None:
+            self.print("current drop: -")
+            return
+        progress = max(0.0, min(1.0, drop["progress"]))
+        filled = round(progress * 20)
+        self.print(
+            f"{drop['game']} | {drop['campaign']} | {drop['name']} | "
+            f"[{'#' * filled}{'-' * (20 - filled)}] {progress:.1%} | "
+            f"{drop['current_minutes']}/{drop['required_minutes']} min "
+            f"({drop['remaining_minutes']} min remaining, {drop['timer_seconds']}s)"
+        )
+
+    def _cancel_watch(self) -> None:
+        if self._watch_task is not None:
+            self._watch_task.cancel()
+            self._watch_task = None
+
+    def _command_watch(self, values: list[str]) -> None:
+        if len(values) > 1:
+            raise CommandError("usage: watch [seconds]")
+        try:
+            seconds = int(values[0]) if values else 5
+        except ValueError as exc:
+            raise CommandError("watch seconds must be a positive integer") from exc
+        if seconds < 1:
+            raise CommandError("watch seconds must be a positive integer")
+        self._command_progress()
+
+        async def repeat() -> None:
+            while True:
+                await asyncio.sleep(seconds)
+                self._command_progress()
+
+        self._watch_task = asyncio.create_task(repeat())
+
+    def _command_filters(self, values: list[str]) -> None:
+        self._campaign_filters = replace(self._campaign_filters, **self._filter_changes(values))
+        for field in fields(CampaignFilters):
+            self.print(f"{field.name} = {'on' if getattr(self._campaign_filters, field.name) else 'off'}")
+
+    def _command_settings(self) -> None:
+        self.print("key | type | value | choices")
+        for key, setting in self.actions.settings_schema().items():
+            choices = ", ".join(map(str, setting.get("choices", []))) or "-"
+            self.print(f"{key} | {setting['type']} | {setting['value']} | {choices}")
 
     def _command_priority(self, values: list[str]) -> None:
         if not values:
