@@ -148,22 +148,49 @@ class OAuthLoginTests(unittest.IsolatedAsyncioTestCase):
                         (400, {"message": message}),
                     ], request_urls=requests, sleep_intervals=intervals)
                 self.assertIn("client ANDROID_APP", str(raised.exception))
-                self.assertIn(message.casefold(), str(raised.exception))
+                self.assertIn(message.casefold(), str(raised.exception).casefold())
                 self.assertNotIn("local-device-code", str(raised.exception))
                 self.assertEqual(len(requests), 2)
                 self.assertEqual(intervals, [1])
 
-    async def test_unknown_or_unparseable_token_error_keeps_polling(self) -> None:
+    async def test_transient_token_errors_keep_polling(self) -> None:
         intervals = []
         token, requests, _ = await self._login_with([
             (200, self._device_response()),
-            (400, {"message": "temporary failure"}),
-            (400, json.JSONDecodeError("invalid", "", 0)),
+            (429, {"message": "too many requests"}),
+            (503, json.JSONDecodeError("invalid", "", 0)),
+            (400, {"message": "authorization pending"}),
             (200, {"access_token": "test-token"}),
         ], sleep_intervals=intervals)
         self.assertEqual(token, "test-token")
-        self.assertEqual(len(requests), 4)
-        self.assertEqual(intervals, [1, 1, 1])
+        self.assertEqual(len(requests), 5)
+        self.assertEqual(intervals, [1, 1, 1, 1])
+
+    async def test_unknown_or_unparseable_token_error_stops(self) -> None:
+        for status, payload in (
+            (400, {"message": "invalid_grant"}),
+            (400, json.JSONDecodeError("invalid", "", 0)),
+            (403, {"message": "forbidden"}),
+        ):
+            with self.subTest(status=status, payload=payload):
+                requests = []
+                with self.assertRaises(LoginException) as raised:
+                    await self._login_with([
+                        (200, self._device_response()), (status, payload),
+                    ], request_urls=requests)
+                self.assertIn(f"{status} ", str(raised.exception))
+                self.assertEqual(len(requests), 2)
+
+    async def test_token_error_reason_masks_codes(self) -> None:
+        with self.assertRaises(LoginException) as raised:
+            await self._login_with([
+                (200, self._device_response()),
+                (400, {"message": "bad local-device-code for LOCAL123"}),
+            ])
+        message = str(raised.exception)
+        self.assertNotIn("local-device-code", message)
+        self.assertNotIn("LOCAL123", message)
+        self.assertIn("<redacted>", message)
 
     @staticmethod
     def _device_response() -> dict[str, object]:

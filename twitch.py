@@ -106,9 +106,12 @@ class SkipExtraJsonDecoder(json.JSONDecoder):
 SAFE_LOADS = lambda s: json.loads(s, cls=SkipExtraJsonDecoder)
 
 
-def _oauth_error_reason(message: object) -> str:
+def _oauth_error_reason(message: object, *secrets: str) -> str:
     if not isinstance(message, str):
         return "request rejected"
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "<redacted>")
     reason = "".join(char for char in " ".join(message.split()) if char.isprintable()).strip()[:120]
     return reason or "request rejected"
 
@@ -246,16 +249,21 @@ class _AuthState:
                             except (aiohttp.ContentTypeError, ValueError):
                                 response_json = None
                             message = response_json.get("message") if isinstance(response_json, dict) else None
-                            reason = _oauth_error_reason(message).casefold()
-                            if reason == "slow_down":
+                            reason = _oauth_error_reason(message, device_code, user_code)
+                            code = reason.casefold().replace(" ", "_")
+                            if code == "slow_down":
                                 interval += 5
-                            elif reason in (
-                                "invalid device code", "access_denied", "expired_token", "invalid client"
+                            elif (
+                                code != "authorization_pending"
+                                and response.status != 429
+                                and response.status < 500
                             ):
+                                # anything else (invalid_grant, expired_token, access_denied...)
+                                # is permanent: waiting for the code to expire would only hide it
                                 raise LoginException(
-                                    f"Twitch rejected the token login for client {client_name}: {reason}"
+                                    f"Twitch rejected the token login for client {client_name}: "
+                                    f"{response.status} {reason}"
                                 )
-                            # Unknown or unreadable errors may be transient; retain the existing polling behavior.
                             continue
                         try:
                             response_json = await response.json()
