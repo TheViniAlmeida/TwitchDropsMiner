@@ -89,6 +89,8 @@ def _redacted_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             proxy = URL(value)
             if proxy.password is not None:
                 redacted[name] = str(proxy.with_password("***"))
+        elif name in ("auth", "proxy_auth") and value is not None:
+            redacted[name] = "<redacted>"
         elif name == "cookies":
             redacted[name] = "<redacted>"
     return redacted

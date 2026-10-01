@@ -270,6 +270,13 @@ if __name__ == "__main__":
                     await asyncio.wait_for(client.shutdown(), timeout=10)
                 except asyncio.TimeoutError:
                     client.print("Shutdown timed out.")
+                    try:
+                        if client._session is not None:
+                            from constants import COOKIES_PATH
+
+                            client._session.cookie_jar.save(COOKIES_PATH)
+                    except Exception:
+                        logger.exception("Failed to save cookies after shutdown timeout")
             else:
                 await client.shutdown()
         if not client.gui.close_requested:

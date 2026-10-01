@@ -84,6 +84,18 @@ class ConsoleDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.messages), 3)
         self.assertTrue(all(message.startswith("error:") for message in self.messages))
 
+    async def test_failed_logout_confirmation_keeps_console_reader_alive(self) -> None:
+        self.manager._logout = AsyncMock(side_effect=RuntimeError("logout failed"))
+        await self.manager.dispatch_command("logout")
+        with self.assertLogs("TwitchDrops", level="ERROR"):
+            await self.manager.dispatch_command("y")
+        self.assertEqual(self.messages[-1], "error: logout failed")
+        self.assertFalse(self.twitch.closed)
+
+        await self.manager.dispatch_command("quit")
+        self.assertTrue(self.twitch.closed)
+        self.assertTrue(self.manager.close_requested)
+
     async def test_logout_restarts_after_success_or_http_error(self) -> None:
         for status in (200, 400):
             with self.subTest(status=status):

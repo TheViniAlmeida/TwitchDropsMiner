@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from aiohttp import BasicAuth
+from multidict import CIMultiDict
 from types import SimpleNamespace
 import unittest
 
@@ -14,13 +16,15 @@ from websocket import Websocket, _redacted_sent_message
 class RedactionTests(unittest.TestCase):
     def test_request_kwargs_are_redacted_without_mutation(self) -> None:
         kwargs = {
-            "headers": {"aUtHoRiZaTiOn": "Bearer sample", "Client-Integrity": "proof",
-                        "Cookie": "session=sample", "X-Device-Id": "device"},
+            "headers": CIMultiDict({"aUtHoRiZaTiOn": "Bearer sample", "Client-Integrity": "proof",
+                                    "Cookie": "session=sample", "X-Device-Id": "device"}),
             "data": {"token": "sample", "device_code": "sample", "other": "public"},
             "json": {"access_token": "sample", "refresh_token": "sample"},
             "params": {"password": "sample", "client_secret": "sample",
                        "auth-token": "sample"},
             "proxy": URL("http://alice:sample@localhost:8080"),
+            "auth": BasicAuth("auth_user", "auth_password"),
+            "proxy_auth": BasicAuth("proxy_user", "proxy_password"),
         }
         redacted = _redacted_request_kwargs(kwargs)
 
@@ -31,6 +35,11 @@ class RedactionTests(unittest.TestCase):
         self.assertTrue(all(value == "<redacted>" for value in redacted["json"].values()))
         self.assertTrue(all(value == "<redacted>" for value in redacted["params"].values()))
         self.assertEqual(redacted["proxy"], "http://alice:***@localhost:8080")
+        self.assertEqual(redacted["auth"], "<redacted>")
+        self.assertEqual(redacted["proxy_auth"], "<redacted>")
+        redacted_repr = repr(redacted)
+        for secret in ("auth_user", "auth_password", "proxy_user", "proxy_password"):
+            self.assertNotIn(secret, redacted_repr)
         self.assertEqual(kwargs["headers"]["aUtHoRiZaTiOn"], "Bearer sample")
         self.assertEqual(kwargs["data"]["token"], "sample")
         self.assertEqual(kwargs["proxy"].password, "sample")

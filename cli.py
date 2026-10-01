@@ -420,7 +420,13 @@ class CLIManager:
         if self._logout_confirmation:
             self._logout_confirmation = False
             if line.casefold() == "y":
-                await self._logout()
+                try:
+                    await self._logout()
+                except CommandError as exc:
+                    self.print(f"error: {exc}")
+                except Exception as exc:
+                    self.print(f"error: {exc}")
+                    logger.exception("Logout command failed")
             else:
                 self.print("logout cancelled")
             return
@@ -472,6 +478,7 @@ class CLIManager:
             self.print(f"error: {exc}")
         except Exception as exc:
             self.print(f"error: {exc}")
+            logger.exception("Console command failed")
 
     def _require_no_extra(self, values: list[str]) -> None:
         if values:
