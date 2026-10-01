@@ -322,7 +322,7 @@ class BindV2Tests(unittest.IsolatedAsyncioTestCase):
                 return ("127.0.0.1", self.port)
 
         class FakeSite:
-            def __init__(self, runner, host, port):
+            def __init__(self, runner, host, port, ssl_context=None):
                 self.port = port
                 self._server = None
 

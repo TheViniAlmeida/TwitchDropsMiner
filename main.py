@@ -130,6 +130,10 @@ if __name__ == "__main__":
         run_parser.add_argument("--dashboard-token-file", nargs="?", const="", metavar="PATH",
                                 help="enable token authentication (default file: DATA_DIR/dashboard.token)")
         run_parser.add_argument("--dashboard-readonly", action="store_true")
+        run_parser.add_argument("--dashboard-tls", action="store_true",
+                                help="serve HTTPS (self-signed certificate in DATA_DIR/dashboard-tls unless given)")
+        run_parser.add_argument("--dashboard-cert", metavar="PATH", help="TLS certificate (PEM); needs --dashboard-key")
+        run_parser.add_argument("--dashboard-key", metavar="PATH", help="TLS private key (PEM, owner-only)")
         settings_parser = cli_subparsers.add_parser("settings")
         settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
         settings_subparsers.add_parser("show")
