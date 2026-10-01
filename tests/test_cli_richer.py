@@ -209,6 +209,10 @@ class RichActionsTests(unittest.IsolatedAsyncioTestCase):
         self.messages.clear()
         await self.manager.dispatch_command("campaigns --all --filter upcoming=on Alpha")
         self.assertTrue(any("Alpha | Campaign" in message for message in self.messages))
+        self.messages.clear()
+        with patch.object(self.actions, "campaigns", wraps=self.actions.campaigns) as campaigns:
+            await self.manager.dispatch_command("campaigns --all Dead by Daylight")
+        self.assertEqual(campaigns.call_args.kwargs["game"], "Dead by Daylight")
         self.manager._current_drop = campaign.drops[0]
         self.manager.progress.seconds = 15
         self.messages.clear()

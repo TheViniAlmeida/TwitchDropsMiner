@@ -8,6 +8,7 @@ import os
 import secrets
 import shlex
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -23,6 +24,21 @@ class ControlUnavailable(ConnectionError):
 
 # sun_path is 108 bytes on Linux and 104 on macOS/BSD
 _SUN_PATH_MAX = 100
+
+
+def _restrict_windows_acl(path: Path) -> None:
+    """Drop inherited ACEs and grant access to the current user only (icacls ships with Windows)."""
+    user = os.environ.get("USERNAME")
+    if not user:
+        raise OSError("cannot restrict control file access: USERNAME is not set")
+    domain = os.environ.get("USERDOMAIN")
+    account = f"{domain}\\{user}" if domain else user
+    result = subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{account}:F"],
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise OSError(f"cannot restrict control file access (icacls exit {result.returncode})")
 
 
 @contextmanager
@@ -91,6 +107,9 @@ class ControlServer:
             try:
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 created = True
+                if os.name == "nt":
+                    # mode bits mean nothing on Windows: restrict the ACL before the token is written
+                    _restrict_windows_acl(self.path)
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
                     json.dump({"port": port, "token": self.token, "pid": os.getpid()}, stream)
                 os.chmod(self.path, 0o600)

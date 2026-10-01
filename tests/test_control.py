@@ -312,3 +312,18 @@ runpy.run_path("main.py", run_name="__main__")
                 thread.join(timeout=2)
             self.assertEqual(process.returncode, 0, output[-1000:])
             self.assertFalse((data_dir / "control.sock").exists())
+
+
+class WindowsAclTests(unittest.TestCase):
+    def test_icacls_restricts_to_current_user_and_fails_closed(self) -> None:
+        import control
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"USERNAME": "alice", "USERDOMAIN": "HOME"}), \
+                patch("control.subprocess.run") as run:
+            run.return_value.returncode = 0
+            control._restrict_windows_acl(Path("control.json"))
+            self.assertEqual(run.call_args.args[0],
+                             ["icacls", "control.json", "/inheritance:r", "/grant:r", "HOME\\alice:F"])
+            run.return_value.returncode = 5
+            with self.assertRaises(OSError):
+                control._restrict_windows_acl(Path("control.json"))

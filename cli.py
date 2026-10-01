@@ -686,7 +686,7 @@ class CLIManager:
     def _command_campaigns(self, values: list[str]) -> None:
         include_all = False
         changes: list[str] = []
-        game = None
+        words: list[str] = []
         remaining = iter(values)
         for value in remaining:
             if value == "--all":
@@ -696,10 +696,12 @@ class CLIManager:
                     changes.append(next(remaining))
                 except StopIteration as exc:
                     raise CommandError("usage: campaigns [--all] [--filter k=v ...] [game]") from exc
-            elif value.startswith("--") or game is not None:
+            elif value.startswith("--"):
                 raise CommandError("usage: campaigns [--all] [--filter k=v ...] [game]")
             else:
-                game = value
+                # multi-word game names work without quoting, like "game" and "drops"
+                words.append(value)
+        game = " ".join(words) or None
         selected = replace(self._campaign_filters, **self._filter_changes(changes))
         self.print("game | campaign | status | linked | progress | claimed/total | ends at | link")
         for campaign in self.actions.campaigns(selected, game=game, include_all=include_all):
