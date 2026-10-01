@@ -61,7 +61,9 @@ class SessionFileTests(unittest.TestCase):
             self.path.write_bytes(b"old")
             with patch("auth_session.os.replace", wraps=os.replace) as replace:
                 auth_session.save_jar(jar, self.path)
-            self.assertEqual(replace.call_count, 1)
+            # the unreadable "old" file is archived first, then the jar replaces it
+            self.assertEqual(replace.call_count, 2)
+            self.assertEqual(Path(replace.call_args.args[1]), self.path)
             self.assertNotEqual(Path(replace.call_args.args[0]), self.path)
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
             saved = self.path.read_bytes()
@@ -127,6 +129,19 @@ class SessionFileTests(unittest.TestCase):
         self.assertEqual(auth_session.read_token(backup)[0], "valid-secret")
         with self.assertRaisesRegex(ValueError, "cannot read the session file"):
             auth_session.read_token(self.path)
+
+    def test_unreadable_jar_is_copied_before_save_and_bad_backup_never_restored(self) -> None:
+        self.path.write_bytes(b"unreadable but maybe valid")
+        with auth_session._cookie_jar() as jar:
+            jar.update_cookies({"auth-token": "new-secret"}, ClientType.ANDROID_APP.CLIENT_URL)
+            auth_session.save_jar(jar, self.path)
+        copies = list(self.path.parent.glob("cookies.jar.bak.[0-9]*"))
+        self.assertEqual([copy.read_bytes() for copy in copies], [b"unreadable but maybe valid"])
+        backup = self.path.with_name("cookies.jar.bak")
+        backup.write_bytes(b"corrupt backup")
+        with self.assertRaisesRegex(ValueError, "unreadable"):
+            auth_session.restore_session(self.path)
+        self.assertEqual(auth_session.read_token(self.path)[0], "new-secret")
 
     def test_second_restore_keeps_the_first_previous_session(self) -> None:
         auth_session.write_session("backup", "1", ClientType.ANDROID_APP, self.path)
@@ -234,10 +249,34 @@ class AuthCommandTests(unittest.TestCase):
         with patch.object(cli_commands, "validate_token", new_callable=AsyncMock) as validate:
             validate.return_value = dict(client_id=ClientType.ANDROID_APP.CLIENT_ID, login="alice", user_id="7", expires_in=123)
             with patch.dict(os.environ, {"TDM_AUTH_TOKEN": "new-secret"}), patch.object(
-                cli_commands, "backup_session", side_effect=OSError(28, "No space left on device")
+                auth_session, "backup_session", side_effect=OSError(28, "No space left on device")
             ):
                 self.assertEqual(self.run_auth("import"), 2)
         self.assertEqual(auth_session.read_token(self.path)[0], "old-secret")
+
+    def test_import_new_session_backup_failure_keeps_old_session(self) -> None:
+        auth_session.write_session("old-secret", "8", ClientType.ANDROID_APP, self.path)
+        backup = self.path.with_name("cookies.jar.bak")
+        real_copy = auth_session._copy_atomic
+
+        def failing_copy(source, destination):
+            if Path(destination) == backup and auth_session._file_token(Path(source)) == "new-secret":
+                raise OSError(28, "No space left on device")
+            return real_copy(source, destination)
+
+        with patch.object(cli_commands, "validate_token", new_callable=AsyncMock) as validate:
+            validate.return_value = dict(client_id=ClientType.ANDROID_APP.CLIENT_ID, login="alice", user_id="7", expires_in=123)
+            with patch.dict(os.environ, {"TDM_AUTH_TOKEN": "new-secret"}), \
+                    patch.object(auth_session, "_copy_atomic", side_effect=failing_copy):
+                self.assertEqual(self.run_auth("import"), 2)
+            self.assertEqual(auth_session.read_token(self.path)[0], "old-secret")
+            self.assertEqual(list(self.path.parent.glob(".cookies.jar.*")), [])
+            with patch.dict(os.environ, {"TDM_AUTH_TOKEN": "new-secret"}):
+                self.assertEqual(self.run_auth("import"), 0)
+        self.assertEqual(auth_session.read_token(self.path)[0], "new-secret")
+        self.assertEqual(auth_session.read_token(backup)[0], "new-secret")
+        archived = [auth_session._file_token(path) for path in self.path.parent.glob("cookies.jar.bak.[0-9]*")]
+        self.assertIn("old-secret", archived)
 
     def test_offline_logout_backup_failure_keeps_saved_session(self) -> None:
         self.path.write_bytes(b"saved login")

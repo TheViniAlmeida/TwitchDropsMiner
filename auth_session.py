@@ -54,8 +54,10 @@ def _jar_token(jar: aiohttp.CookieJar) -> str | None:
 def save_jar(jar: aiohttp.CookieJar, path: Path = COOKIES_PATH) -> None:
     """Atomically save the jar; never drop a saved session without a backup of it."""
     path = Path(path)
-    saved = _file_token(path) if path.is_file() else None
-    if saved is not None and _jar_token(jar) != saved:
+    existing = path.is_file() and path.stat().st_size > 0
+    saved = _file_token(path) if existing else None
+    # an unreadable file may still hold a valid session: keep a copy before replacing it
+    if existing and (saved is None or _jar_token(jar) != saved):
         # raises OSError when the backup cannot be written: the saved file stays untouched
         backup_session(path)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -153,6 +155,8 @@ def restore_session(path: Path = COOKIES_PATH) -> tuple[Path, Path]:
     backup = path.with_name(path.name + ".bak")
     if not backup.is_file() or backup.stat().st_size == 0:
         raise ValueError("no saved session backup")
+    if _file_token(backup) is None:
+        raise ValueError("the saved session backup is unreadable; nothing was changed")
     previous = path.with_name(path.name + ".bak.prev")
     if previous.is_file() and not _same_token(path, previous) and not _same_token(backup, previous):
         # a second restore must not lose the session kept by the first one
@@ -200,6 +204,26 @@ def write_session(token: str, user_id: str, client: ClientInfo, path: Path = COO
     with _cookie_jar() as jar:
         jar.update_cookies({"auth-token": token, "persistent": str(user_id)}, client.CLIENT_URL)
         save_jar(jar, path)
+
+
+def install_session(token: str, user_id: str, client: ClientInfo, path: Path = COOKIES_PATH) -> None:
+    """Publish a new session only after the old one and the new one both have a backup."""
+    path = Path(path)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(descriptor)
+    staging = Path(name)
+    try:
+        write_session(token, user_id, client, staging)
+        if path.is_file() and path.stat().st_size and backup_session(path) is None:
+            raise OSError("cannot back up the saved session")
+        backup = path.with_name(path.name + ".bak")
+        if backup.exists() and not _same_token(staging, backup):
+            _archive(backup, path)
+        _copy_atomic(staging, backup)
+        # last step: until here cookies.jar still holds the previous session
+        _copy_atomic(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
 
 
 async def validate_token(session: aiohttp.ClientSession, token: str, *, proxy: URL | None = None) -> dict:
