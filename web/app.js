@@ -81,9 +81,11 @@ function image(url, label) {
 
 function bar(progress) {
   const fraction = Math.max(0, Math.min(1, Number(progress) || 0));
-  const track = el('div', { class: 'bar', attrs: { role: 'progressbar', 'aria-valuenow': Math.round(fraction * 100), 'aria-valuemin': 0, 'aria-valuemax': 100 } });
-  const fill = el('span');
-  fill.style.width = `${fraction * 100}%`;
+  // an SVG rect width attribute keeps the page free of inline styles
+  const track = document.createElementNS(SVG, 'svg');
+  for (const [name, value] of Object.entries({ class: 'bar', viewBox: '0 0 100 10', preserveAspectRatio: 'none', role: 'progressbar', 'aria-valuenow': Math.round(fraction * 100), 'aria-valuemin': 0, 'aria-valuemax': 100 })) track.setAttribute(name, value);
+  const fill = document.createElementNS(SVG, 'rect');
+  for (const [name, value] of Object.entries({ class: 'bar-fill', width: fraction * 100, height: 10 })) fill.setAttribute(name, value);
   track.append(fill);
   return track;
 }

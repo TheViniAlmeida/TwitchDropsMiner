@@ -76,7 +76,7 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         campaign = SimpleNamespace(
             id="campaign1", name="Campaign", game=SimpleNamespace(name="Game"),
             progress=0.5, claimed_drops=0, total_drops=1, starts_at=now, ends_at=now,
-            image_url=URL("https://static-cdn.jtvnw.net/game.jpg"), finished=False,
+            image_url=URL("https://static-cdn.jtvnw.net/game.jpg?secret=1"), finished=False,
             expired=False, drops=[drop],
         )
         drop.campaign = campaign
@@ -91,6 +91,7 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshots[0]["current_drop"]["remaining_minutes"], 5)
         self.assertEqual(snapshots[1][0]["watching"], True)
         self.assertEqual(snapshots[2][0]["drops"][0]["progress"], 0.5)
+        self.assertEqual(snapshots[2][0]["image_url"], "https://static-cdn.jtvnw.net/game.jpg")
         self.assertEqual(snapshots[3], ["Alpha", "Zed"])
 
         campaign.finished = True
