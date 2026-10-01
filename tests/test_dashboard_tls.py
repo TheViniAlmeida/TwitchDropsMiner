@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import time
 from pathlib import Path
 import shutil
 import socket
@@ -72,7 +74,7 @@ class SelfSignedTests(unittest.TestCase):
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(key.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode) & 0o077, 0)
-        self.assertEqual(sorted(path.name for path in self.path.iterdir()), ["cert.pem", "key.pem", "names.txt"])
+        self.assertEqual(sorted(path.name for path in self.path.iterdir()), ["cert.pem", "key.pem", "pair.json"])
         content = cert.read_bytes()
         self.assertEqual(self_signed_pair(self.path, [], "127.0.0.1"), (cert, key))
         self.assertEqual(cert.read_bytes(), content)
@@ -84,12 +86,22 @@ class SelfSignedTests(unittest.TestCase):
         first = cert.read_bytes()
         self_signed_pair(self.path, [], "panel.lan")
         self.assertNotEqual(cert.read_bytes(), first)
-        self.assertIn("DNS:panel.lan", (self.path / "names.txt").read_text().split(","))
-        # a pair without its names file (crash before the last step) is never trusted
-        (self.path / "names.txt").unlink()
+        self.assertIn("DNS:panel.lan", json.loads((self.path / "pair.json").read_text())["names"])
+        # a pair without its info file (crash before the last step) is never trusted
+        (self.path / "pair.json").unlink()
         second = cert.read_bytes()
         self_signed_pair(self.path, [], "panel.lan")
         self.assertNotEqual(cert.read_bytes(), second)
+
+    def test_pair_close_to_expiry_is_replaced(self) -> None:
+        cert, _key = self_signed_pair(self.path, [], "127.0.0.1")
+        first = cert.read_bytes()
+        info = json.loads((self.path / "pair.json").read_text())
+        self.assertGreater(info["not_after"] - time.time(), 800 * 86400)
+        info["not_after"] = time.time() + 86400
+        (self.path / "pair.json").write_text(json.dumps(info))
+        self_signed_pair(self.path, [], "127.0.0.1")
+        self.assertNotEqual(cert.read_bytes(), first)
 
     def test_fingerprint_of_a_full_chain_is_the_server_certificate(self) -> None:
         cert, _key = self_signed_pair(self.path, [], "127.0.0.1")
@@ -185,13 +197,16 @@ class TLSStartFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_generated_pair_covers_the_resolved_host_addresses(self) -> None:
         with tempfile.TemporaryDirectory() as directory, \
                 patch("dashboard.DATA_DIR", Path(directory)), \
-                patch("dashboard._local_ips", return_value=[]), \
+                patch("dashboard._interface_entries", return_value=[("eth0", "fd12::5")]), \
                 patch("dashboard.socket.gethostbyname_ex", return_value=("host", [], ["10.9.8.7"])):
             manager = FakeManager()
             manager.actions = Actions(FakeTwitch(), manager)
             dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig(port=0, enabled=True, tls=True))
             dashboard._tls()
-            self.assertIn("IP:10.9.8.7", (Path(directory) / "dashboard-tls" / "names.txt").read_text().split(","))
+            names = json.loads((Path(directory) / "dashboard-tls" / "pair.json").read_text())["names"]
+            # a unique-local IPv6 address is hidden from the startup listing but still needs a SAN
+            self.assertIn("IP:fd12::5", names)
+            self.assertIn("IP:10.9.8.7", json.loads((Path(directory) / "dashboard-tls" / "pair.json").read_text())["names"])
 
     @unittest.skipIf(OPENSSL is None, "openssl is not installed")
     async def test_failure_after_bind_cleans_everything(self) -> None:

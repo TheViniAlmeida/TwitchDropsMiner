@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -11,10 +12,14 @@ import ssl
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from private_file import WINDOWS, restrict_to_owner
 
+_VALID_DAYS = 825
+# a pair this close to expiry is replaced before any client starts refusing it
+_RENEW_BEFORE = 30 * 86400
 _DNS_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
 
 
@@ -41,12 +46,14 @@ def subject_alt_names(addresses: list[str], bound: str) -> str:
     return ",".join([*(f"DNS:{name}" for name in sorted(names)), *(f"IP:{ip}" for ip in sorted(ips))])
 
 
-def _covered(names_file: Path, wanted: str) -> bool:
+def _reusable(info_file: Path, wanted: str) -> bool:
+    """The saved pair covers every wanted name and stays valid for a while yet."""
     try:
-        saved = set(names_file.read_text(encoding="ascii").split(","))
-    except (OSError, UnicodeError):
+        info = json.loads(info_file.read_text(encoding="ascii"))
+        saved, not_after = set(info["names"]), float(info["not_after"])
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
         return False
-    return set(wanted.split(",")) <= saved
+    return set(wanted.split(",")) <= saved and not_after - time.time() > _RENEW_BEFORE
 
 
 def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple[Path, Path]:
@@ -54,9 +61,9 @@ def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple
 
     The key is owner-only before it holds anything.
     """
-    cert, key, names_file = directory / "cert.pem", directory / "key.pem", directory / "names.txt"
+    cert, key, info_file = directory / "cert.pem", directory / "key.pem", directory / "pair.json"
     names = subject_alt_names(addresses, bound)
-    if cert.is_file() and key.is_file() and _covered(names_file, names):
+    if cert.is_file() and key.is_file() and _reusable(info_file, names):
         return cert, key
     openssl = shutil.which("openssl")
     if openssl is None:
@@ -70,7 +77,7 @@ def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple
             restrict_to_owner(staged_key)
             result = subprocess.run(
                 [openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                 "-nodes", "-keyout", str(staged_key), "-out", str(staged_cert), "-days", "825",
+                 "-nodes", "-keyout", str(staged_key), "-out", str(staged_cert), "-days", str(_VALID_DAYS),
                  "-subj", "/CN=TwitchDropsMiner dashboard",
                  "-addext", "subjectAltName=" + names,
                  "-addext", "basicConstraints=critical,CA:FALSE",
@@ -80,13 +87,16 @@ def self_signed_pair(directory: Path, addresses: list[str], bound: str) -> tuple
             if result.returncode != 0 or not staged_cert.is_file():
                 raise TLSError(f"openssl could not create the dashboard certificate (exit {result.returncode})")
             os.chmod(staged_key, 0o600)
-            staged_names = Path(staging, "names.txt")
-            staged_names.write_text(names, encoding="ascii")
-            # key, then certificate, then names: a pair only counts once all three match
-            names_file.unlink(missing_ok=True)
+            staged_info = Path(staging, "pair.json")
+            # one hour of margin: openssl starts the validity a moment before this point
+            staged_info.write_text(json.dumps({
+                "names": names.split(","), "not_after": int(time.time()) + _VALID_DAYS * 86400 - 3600,
+            }), encoding="ascii")
+            # key, then certificate, then its info: a pair only counts once all three match
+            info_file.unlink(missing_ok=True)
             os.replace(staged_key, key)
             os.replace(staged_cert, cert)
-            os.replace(staged_names, names_file)
+            os.replace(staged_info, info_file)
     except subprocess.TimeoutExpired as exc:
         raise TLSError("openssl timed out creating the dashboard certificate") from exc
     except OSError as exc:

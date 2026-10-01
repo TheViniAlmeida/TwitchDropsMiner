@@ -299,7 +299,8 @@ class Dashboard:
             if self.config.tls_cert is not None and self.config.tls_key is not None:
                 cert, key = self.config.tls_cert, self.config.tls_key
             else:
-                addresses = list(_local_ips())
+                # every interface, unlike the startup listing: any address that reaches us needs a SAN
+                addresses = [address for _, address in _interface_entries()]
                 try:
                     # Windows has no interface listing: resolving our own name stays local
                     addresses += socket.gethostbyname_ex(socket.gethostname())[2]
