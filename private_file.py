@@ -10,10 +10,17 @@ from pathlib import Path
 WINDOWS = sys.platform == "win32"
 
 
+def _run(command: list[str], **options) -> subprocess.CompletedProcess:
+    # a hung tool must fail like a refused one, not freeze its caller
+    try:
+        return subprocess.run(command, capture_output=True, check=False, timeout=30, **options)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(f"{command[0]} timed out") from exc
+
+
 def _process_sid() -> str:
     # whoami ships with Windows and reports the identity of this process, not of %USERNAME%
-    result = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"],
-                            capture_output=True, text=True, check=False)
+    result = _run(["whoami", "/user", "/fo", "csv", "/nh"], text=True)
     sid = result.stdout.strip().rsplit(",", 1)[-1].strip().strip('"')
     if result.returncode != 0 or not sid.startswith("S-1-"):
         raise OSError("cannot determine the account SID of this process")
@@ -29,8 +36,7 @@ def restrict_to_owner(path: Path) -> None:
     if not WINDOWS:
         return
     sid = _process_sid()
-    result = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"],
-                            capture_output=True, check=False)
+    result = _run(["icacls", str(path), "/inheritance:r", "/grant:r", f"*{sid}:F"])
     if result.returncode != 0:
         raise OSError(f"cannot restrict access to {path.name} (icacls exit {result.returncode})")
 

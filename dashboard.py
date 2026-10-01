@@ -11,6 +11,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -135,7 +136,8 @@ _SAMPLE_KEYS = {"t", "drop_id", "campaign", "progress", "remaining_minutes", "cl
 
 
 def _number(value: Any) -> bool:
-    return type(value) in (int, float)
+    # NaN and Infinity would reach the panel as JSON the browser cannot parse
+    return type(value) in (int, float) and math.isfinite(value)
 
 
 def _valid_sample(sample: Any) -> bool:
@@ -394,7 +396,7 @@ class Dashboard:
             if ssl_context is not None:
                 self._quiet_handshake_errors()
             self._load_history()
-            self._sample_history()
+            await self._record_history()
             self._history_task = asyncio.create_task(self._sample_history_loop())
             host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
             scheme = "https" if ssl_context is not None else "http"
@@ -468,9 +470,7 @@ class Dashboard:
             current = self.manager.actions.progress() or {}
             active = self.manager.actions.state().get("current_drop") or {}
             now = int(time.time())
-            # the clock went back: what now lies in the future would break the chart's order
-            while self.history and self.history[-1]["t"] > now:
-                self.history.pop()
+            self._prune_history(now)
             self.history.append({
                 "t": now, "drop_id": current.get("id"),
                 "campaign": current.get("campaign"),
@@ -482,20 +482,33 @@ class Dashboard:
             })
         except Exception as exc:
             self._history_warning("sampling failed", exc)
-            return
-        self._save_history()
+
+    def _prune_history(self, now: float) -> None:
+        # a suspended machine wakes up with samples older than a day
+        while self.history and self.history[0]["t"] < now - _HISTORY_KEEP:
+            self.history.popleft()
+        # the clock went back: what now lies in the future would break the chart's order
+        while self.history and self.history[-1]["t"] > now:
+            self.history.pop()
+
+    async def _record_history(self) -> None:
+        self._sample_history()
+        if self.config.history_file is not None:
+            # off the event loop: on Windows each save also waits for whoami and icacls
+            await asyncio.to_thread(self._write_history, self._history_text())
 
     def _history_warning(self, what: str, exc: BaseException) -> None:
-        message = self._clean(exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc))
-        if (what, message) not in self._history_errors:
-            self._history_errors.add((what, message))
+        # keyed by kind, not text: messages may carry a random temporary file name
+        key = (what, type(exc).__name__, getattr(exc, "errno", None))
+        if key not in self._history_errors:
+            self._history_errors.add(key)
+            message = self._clean(exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc))
             logger.warning("Dashboard history %s: %s", what, message)
 
     def _load_history(self) -> None:
         """Drop samples older than a day, then bring back the saved ones a restart would lose."""
         now = time.time()
-        while self.history and self.history[0]["t"] < now - _HISTORY_KEEP:
-            self.history.popleft()
+        self._prune_history(now)
         path = self.config.history_file
         if path is None:
             return
@@ -519,20 +532,25 @@ class Dashboard:
                 self.history.append(sample)
                 previous = sample["t"]
 
+    def _history_text(self) -> str:
+        return "".join(json.dumps(item) + "\n" for item in self.history)
+
     def _save_history(self) -> None:
-        path = self.config.history_file
-        if path is None:
-            return
+        if self.config.history_file is not None:
+            self._write_history(self._history_text())
+
+    def _write_history(self, text: str) -> None:
+        # the file is this process' own: the CLI lock file keeps a second miner off DATA_DIR
         try:
             # a whole new owner-only file each time: no torn line, no followed link, no loose ACL
-            rewrite_private(path, "".join(json.dumps(item) + "\n" for item in self.history))
+            rewrite_private(self.config.history_file, text)
         except Exception as exc:
             self._history_warning("could not be saved", exc)
 
     async def _sample_history_loop(self) -> None:
         while True:
             await asyncio.sleep(self.config.history_interval)
-            self._sample_history()
+            await self._record_history()
 
     def _error(self, status: int, message: str) -> web.Response:
         return web.json_response({"error": message}, status=status)

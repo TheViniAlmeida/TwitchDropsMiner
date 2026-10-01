@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,11 @@ class HistoryFileTests(unittest.TestCase):
         manager.actions = FakeActions()
         return Dashboard(manager, FakeTwitch(), DashboardConfig(history_file=path or self.path))
 
+    @staticmethod
+    def record(dashboard: Dashboard) -> None:
+        dashboard._sample_history()
+        dashboard._save_history()
+
     def lines(self) -> list[dict]:
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
 
@@ -40,11 +46,11 @@ class HistoryFileTests(unittest.TestCase):
         first = self.dashboard()
         first._load_history()
         with patch("dashboard.time.time", return_value=time.time() - 60):
-            first._sample_history()
+            self.record(first)
         self.assertEqual(len(self.lines()), 1)
         second = self.dashboard()
         second._load_history()
-        second._sample_history()
+        self.record(second)
         self.assertEqual(len(second.history), 2)
         self.assertLess(second.history[0]["t"], second.history[1]["t"])
         self.assertEqual(self.lines(), list(second.history))
@@ -53,7 +59,7 @@ class HistoryFileTests(unittest.TestCase):
         if sys.platform == "win32":
             self.skipTest("POSIX mode bits")
         dashboard = self.dashboard()
-        dashboard._sample_history()
+        self.record(dashboard)
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
     def test_old_invalid_and_future_samples_are_dropped(self) -> None:
@@ -70,7 +76,7 @@ class HistoryFileTests(unittest.TestCase):
     def test_file_holds_exactly_what_the_panel_shows(self) -> None:
         dashboard = self.dashboard()
         for _ in range(_HISTORY_SAMPLES + 5):
-            dashboard._sample_history()
+            self.record(dashboard)
         self.assertEqual(len(dashboard.history), _HISTORY_SAMPLES)
         self.assertEqual(self.lines(), list(dashboard.history))
 
@@ -81,7 +87,7 @@ class HistoryFileTests(unittest.TestCase):
             with self.assertLogs("TwitchDrops.dashboard", "WARNING"):
                 dashboard._load_history()
             self.assertEqual(len(dashboard.history), 0)
-            dashboard._sample_history()
+            self.record(dashboard)
         self.assertEqual(len(self.lines()), 1)
 
     def test_symlink_is_neither_read_nor_followed(self) -> None:
@@ -95,7 +101,7 @@ class HistoryFileTests(unittest.TestCase):
             dashboard._load_history()
         self.assertEqual(len(dashboard.history), 0)
         before = target.read_text(encoding="utf-8")
-        dashboard._sample_history()
+        self.record(dashboard)
         # the link itself is replaced by a private file; its target stays as it was
         self.assertEqual(target.read_text(encoding="utf-8"), before)
         self.assertFalse(self.path.is_symlink())
@@ -114,7 +120,7 @@ class HistoryFileTests(unittest.TestCase):
             self.skipTest("POSIX mode bits")
         self.path.write_text("", encoding="utf-8")
         os.chmod(self.path, 0o644)
-        self.dashboard()._sample_history()
+        self.record(self.dashboard())
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
 
     def test_torn_last_line_costs_only_itself(self) -> None:
@@ -123,7 +129,7 @@ class HistoryFileTests(unittest.TestCase):
                              encoding="utf-8")
         dashboard = self.dashboard()
         dashboard._load_history()
-        dashboard._sample_history()
+        self.record(dashboard)
         self.assertEqual([item["t"] for item in self.lines()], [now - 120, dashboard.history[-1]["t"]])
 
     def test_deeply_nested_line_is_skipped(self) -> None:
@@ -156,16 +162,69 @@ class HistoryFileTests(unittest.TestCase):
         dashboard = self.dashboard()
         now = int(time.time())
         dashboard.history.append(_sample(now + 600))
-        dashboard._sample_history()
+        self.record(dashboard)
         times = [item["t"] for item in dashboard.history]
         self.assertEqual(times, sorted(times))
         self.assertLessEqual(times[-1], now + 1)
 
+    def test_non_finite_numbers_are_rejected(self) -> None:
+        now = int(time.time())
+        rows = ['{"t": %d, "drop_id": null, "campaign": null, "progress": 0.5, "remaining_minutes": %s, '
+                '"claimed": 0, "total": 0}' % (now - 100 + index, value)
+                for index, value in enumerate(("1e999", "NaN", "-Infinity"))]
+        self.path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        dashboard = self.dashboard()
+        dashboard._load_history()
+        self.assertEqual(len(dashboard.history), 0)
+
+    def test_day_old_samples_leave_while_running(self) -> None:
+        dashboard = self.dashboard()
+        dashboard.history.append(_sample(int(time.time()) - 25 * 3600))
+        dashboard._sample_history()
+        self.assertEqual(len(dashboard.history), 1)
+        self.assertGreater(dashboard.history[0]["t"], time.time() - 60)
+
+    def test_recording_saves_off_the_event_loop(self) -> None:
+        dashboard = self.dashboard()
+        threads = []
+
+        def write(text: str) -> None:
+            import threading
+            threads.append(threading.current_thread() is threading.main_thread())
+            Dashboard._write_history(dashboard, text)
+
+        dashboard._write_history = write
+        asyncio.run(dashboard._record_history())
+        self.assertEqual(threads, [False])
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_repeated_save_failure_with_random_names_warns_once(self) -> None:
+        dashboard = self.dashboard()
+        names = iter(range(10))
+
+        def failing(path, content):
+            raise OSError(f"cannot restrict access to .tmp{next(names)} (icacls exit 5)")
+
+        with patch("dashboard.rewrite_private", failing), \
+                self.assertLogs("TwitchDrops.dashboard", "WARNING") as warnings:
+            for _ in range(3):
+                self.record(dashboard)
+        self.assertEqual(len(warnings.output), 1)
+
+    def test_hung_acl_tool_fails_instead_of_freezing(self) -> None:
+        import subprocess
+        import private_file
+
+        with patch.object(private_file, "WINDOWS", True), \
+                patch("private_file.subprocess.run", side_effect=subprocess.TimeoutExpired("whoami", 30)):
+            with self.assertRaisesRegex(OSError, "timed out"):
+                private_file.restrict_to_owner(self.path)
+
     def test_save_failure_warns_once_and_keeps_sampling(self) -> None:
         dashboard = self.dashboard(Path(self.directory.name, "missing", "history.jsonl"))
         with self.assertLogs("TwitchDrops.dashboard", "WARNING") as warnings:
-            dashboard._sample_history()
-            dashboard._sample_history()
+            self.record(dashboard)
+            self.record(dashboard)
         self.assertEqual(len(warnings.output), 1)
         self.assertEqual(len(dashboard.history), 2)
 
@@ -174,6 +233,6 @@ class HistoryFileTests(unittest.TestCase):
         manager.actions = FakeActions()
         dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig())
         dashboard._load_history()
-        dashboard._sample_history()
+        self.record(dashboard)
         self.assertEqual(len(dashboard.history), 1)
         self.assertEqual(os.listdir(self.directory.name), [])
