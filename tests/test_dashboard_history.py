@@ -177,6 +177,41 @@ class HistoryFileTests(unittest.TestCase):
         dashboard._load_history()
         self.assertEqual(len(dashboard.history), 0)
 
+    def test_huge_integer_is_not_a_crash(self) -> None:
+        now = int(time.time())
+        row = {**_sample(now - 60), "claimed": 10 ** 309}
+        self.path.write_text(json.dumps(row) + "\n" + json.dumps(_sample(now - 30)) + "\n", encoding="utf-8")
+        dashboard = self.dashboard()
+        dashboard._load_history()
+        self.assertEqual(len(dashboard.history), 2)
+        self.assertEqual(json.loads(dashboard._history_text().splitlines()[0])["claimed"], 10 ** 309)
+
+    def test_stop_waits_for_a_write_in_flight(self) -> None:
+        import threading
+        dashboard = self.dashboard()
+        release = threading.Event()
+        finished = []
+
+        def slow_write(text: str) -> None:
+            release.wait(5)
+            finished.append(text)
+
+        dashboard._write_history = slow_write
+
+        async def scenario() -> None:
+            recorder = asyncio.create_task(dashboard._record_history())
+            await asyncio.sleep(.05)
+            dashboard._history_task = recorder
+            stopping = asyncio.create_task(dashboard.stop())
+            await asyncio.sleep(.05)
+            self.assertFalse(stopping.done())
+            release.set()
+            await stopping
+
+        asyncio.run(scenario())
+        self.assertEqual(len(finished), 1)
+        self.assertIsNone(dashboard._history_write)
+
     def test_day_old_samples_leave_while_running(self) -> None:
         dashboard = self.dashboard()
         dashboard.history.append(_sample(int(time.time()) - 25 * 3600))

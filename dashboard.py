@@ -136,8 +136,9 @@ _SAMPLE_KEYS = {"t", "drop_id", "campaign", "progress", "remaining_minutes", "cl
 
 
 def _number(value: Any) -> bool:
-    # NaN and Infinity would reach the panel as JSON the browser cannot parse
-    return type(value) in (int, float) and math.isfinite(value)
+    # NaN and Infinity would reach the panel as JSON the browser cannot parse; an int is always
+    # finite (and isfinite() overflows on a huge one)
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def _valid_sample(sample: Any) -> bool:
@@ -313,7 +314,8 @@ class Dashboard:
         self._pending_auth: dict[str, int] = {}
         self.history: deque[dict[str, Any]] = deque(maxlen=_HISTORY_SAMPLES)
         self._history_task: asyncio.Task[None] | None = None
-        self._history_errors: set[tuple[str, str]] = set()
+        self._history_errors: set[tuple[str, str, int | None]] = set()
+        self._history_write: asyncio.Future[None] | None = None
         self._loop_handler: Any = None
         self._handler_loop: asyncio.AbstractEventLoop | None = None
         self.app = web.Application(
@@ -451,6 +453,10 @@ class Dashboard:
             self._history_task.cancel()
             await asyncio.gather(self._history_task, return_exceptions=True)
             self._history_task = None
+        if self._history_write is not None:
+            # an older write finishing after a restart would replace newer samples
+            await asyncio.gather(self._history_write, return_exceptions=True)
+            self._history_write = None
         closes = {asyncio.create_task(ws.close(code=WSCloseCode.GOING_AWAY))
                   for ws in tuple(self._sockets)}
         if closes:
@@ -495,7 +501,10 @@ class Dashboard:
         self._sample_history()
         if self.config.history_file is not None:
             # off the event loop: on Windows each save also waits for whoami and icacls
-            await asyncio.to_thread(self._write_history, self._history_text())
+            self._history_write = asyncio.ensure_future(
+                asyncio.to_thread(self._write_history, self._history_text()))
+            # a cancelled sampler leaves the write running: stop() waits for it
+            await asyncio.shield(self._history_write)
 
     def _history_warning(self, what: str, exc: BaseException) -> None:
         # keyed by kind, not text: messages may carry a random temporary file name
@@ -526,9 +535,10 @@ class Dashboard:
                 continue
             try:
                 sample = json.loads(line)
-            except (ValueError, RecursionError):
+                valid = _valid_sample(sample) and previous <= sample["t"] <= now
+            except (ValueError, RecursionError, OverflowError):
                 continue
-            if _valid_sample(sample) and previous <= sample["t"] <= now:
+            if valid:
                 self.history.append(sample)
                 previous = sample["t"]
 
