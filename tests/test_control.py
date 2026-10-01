@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock
@@ -327,3 +328,19 @@ class WindowsAclTests(unittest.TestCase):
             run.return_value.returncode = 5
             with self.assertRaises(OSError):
                 control._restrict_windows_acl(Path("control.json"))
+
+
+class WindowsAclStartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_acl_failure_closes_and_removes_control_file(self) -> None:
+        import tempfile
+        from unittest.mock import patch
+        import control
+        with tempfile.TemporaryDirectory() as directory:
+            server = control.ControlServer(SimpleNamespace(), Path(directory), tcp=True)
+            with patch.object(control, "_WINDOWS", True), \
+                    patch.object(control, "_restrict_windows_acl", side_effect=OSError("icacls failed")), \
+                    patch.object(control.os, "close", wraps=os.close) as close:
+                with self.assertRaises(OSError):
+                    await server.start()
+            close.assert_called_once()
+            self.assertFalse((Path(directory) / "control.json").exists())
