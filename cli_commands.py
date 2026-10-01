@@ -14,7 +14,7 @@ import aiohttp
 
 from auth_session import (
     archive_count, backup_session, client_name, logout_allowed,
-    logout_disabled_message, read_token, restore_session, validate_token, write_session,
+    install_session, logout_disabled_message, read_token, restore_session, validate_token,
 )
 
 from constants import COOKIES_PATH, LOCK_PATH, ClientType, PriorityMode
@@ -236,14 +236,7 @@ def _run_auth(args: Any) -> int:
                 file=sys.stderr,
             )
             return 2
-        if (
-            COOKIES_PATH.is_file() and COOKIES_PATH.stat().st_size
-            and backup_session(COOKIES_PATH) is None
-        ):
-            raise ValueError("cannot back up the saved session; refusing to replace it")
-        write_session(token, data["user_id"], ClientType.ANDROID_APP, COOKIES_PATH)
-        if backup_session(COOKIES_PATH) is None:
-            raise ValueError("cannot back up the imported session")
+        install_session(token, data["user_id"], ClientType.ANDROID_APP, COOKIES_PATH)
         print(f"imported session for {data['login']} (ANDROID_APP)")
         return 0
     except ValueError as exc:

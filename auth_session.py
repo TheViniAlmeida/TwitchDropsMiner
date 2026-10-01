@@ -206,6 +206,26 @@ def write_session(token: str, user_id: str, client: ClientInfo, path: Path = COO
         save_jar(jar, path)
 
 
+def install_session(token: str, user_id: str, client: ClientInfo, path: Path = COOKIES_PATH) -> None:
+    """Publish a new session only after the old one and the new one both have a backup."""
+    path = Path(path)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(descriptor)
+    staging = Path(name)
+    try:
+        write_session(token, user_id, client, staging)
+        if path.is_file() and path.stat().st_size and backup_session(path) is None:
+            raise OSError("cannot back up the saved session")
+        backup = path.with_name(path.name + ".bak")
+        if backup.exists() and not _same_token(staging, backup):
+            _archive(backup, path)
+        _copy_atomic(staging, backup)
+        # last step: until here cookies.jar still holds the previous session
+        _copy_atomic(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
 async def validate_token(session: aiohttp.ClientSession, token: str, *, proxy: URL | None = None) -> dict:
     kwargs = {"proxy": str(proxy)} if proxy else {}
     async with session.get(
