@@ -624,3 +624,20 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 producer.cancel()
                 await asyncio.gather(producer, return_exceptions=True)
+
+
+class DashboardLoopbackHostTests(unittest.IsolatedAsyncioTestCase):
+    async def test_configured_loopback_address_is_an_allowed_host(self) -> None:
+        manager = SimpleNamespace(actions=SimpleNamespace(readonly=False), print=lambda *_: None)
+        dashboard = Dashboard(manager, SimpleNamespace(), DashboardConfig(host="127.0.0.2", port=8787))
+        calls = []
+
+        async def handler(request):
+            calls.append(request.headers["Host"])
+            return web.Response()
+
+        for host, status in (("127.0.0.2:8787", 200), ("127.0.0.3:8787", 403), ("evil.example:8787", 403)):
+            request = make_mocked_request("GET", "/api/state", headers={"Host": host})
+            response = await dashboard._host(request, handler)
+            self.assertEqual(response.status, status, host)
+        self.assertEqual(calls, ["127.0.0.2:8787"])

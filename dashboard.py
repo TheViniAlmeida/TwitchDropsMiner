@@ -245,7 +245,10 @@ class Dashboard:
     @web.middleware
     async def _host(self, request: web.Request, handler: Any) -> web.StreamResponse:
         if is_loopback(self.config.host):
-            allowed = {f"{host}:{self.port}" for host in ("localhost", "127.0.0.1", "[::1]")}
+            bound = f"[{self.config.host}]" if ":" in self.config.host else self.config.host.casefold()
+            allowed = {
+                f"{host}:{self.port}" for host in ("localhost", "127.0.0.1", "[::1]", bound)
+            }
             if request.headers.get("Host") not in allowed:
                 return self._error(403, "forbidden host")
         return await handler(request)
