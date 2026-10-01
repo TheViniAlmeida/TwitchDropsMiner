@@ -901,6 +901,8 @@ class Twitch:
                 else:
                     # with no games available, we switch to IDLE after cleanup
                     self.print(_("status", "no_campaign"))
+                    if (hint := self._empty_priority_hint()) is not None:
+                        self.print(hint)
                     self.change_state(State.IDLE)
             elif self._state is State.CHANNELS_FETCH:
                 self.gui.status.update(_("gui", "status", "gathering"))
@@ -1389,6 +1391,16 @@ class Twitch:
             drop.update_minutes(message["data"]["current_progress_min"])
         elif drop is not None and watching_channel is not None:
             self._warn_foreign_progress(drop)
+
+    def _empty_priority_hint(self) -> str | None:
+        """Explain an idle miner whose settings make every game ineligible."""
+        if self.settings.priority_mode is PriorityMode.PRIORITY_ONLY and not self.settings.priority:
+            return (
+                'Priority mode is "priority only" but the priority list is empty, so no game is mined. '
+                "Add games to the priority list or change the priority mode "
+                "(e.g. set priority_mode ending_soonest)."
+            )
+        return None
 
     def _warn_foreign_progress(self, drop: TimedDrop) -> None:
         # Twitch credits watch time to one stream per account: progress on a drop we are not
