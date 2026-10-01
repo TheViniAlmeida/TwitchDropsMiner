@@ -33,6 +33,7 @@ from version import __version__
 
 
 logger = logging.getLogger("TwitchDrops.dashboard")
+_WS_MAX_MESSAGE = 4096
 _CSP = "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net; connect-src 'self'"
 _ORIGIN = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?\Z")
 
@@ -603,7 +604,8 @@ class Dashboard:
         pending_cap = 1 if self._limited(remote) else 4
         if self.config.token is not None and self._pending_auth.get(remote, 0) >= pending_cap:
             return self._error(429, "too many attempts")
-        ws = web.WebSocketResponse(heartbeat=20)
+        # clients only ever send the small auth frame: refuse anything larger
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=_WS_MAX_MESSAGE)
         self._secure_headers(ws, request.path)
         await ws.prepare(request)
         self._sockets.add(ws)

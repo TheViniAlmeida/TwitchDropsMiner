@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from aiohttp import ClientSession, WSCloseCode, WSServerHandshakeError, web
+from aiohttp import ClientSession, WSCloseCode, WSMsgType, WSServerHandshakeError, web
 from aiohttp.test_utils import make_mocked_request
 
 from cli_actions import Actions, ActionRejected
@@ -607,6 +607,23 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(refused.exception.status, 429)
             await pending.send_json({"auth": "private-token"})
             self.assertEqual((await pending.receive_json())["type"], "state")
+
+    async def test_websocket_rejects_oversized_frames(self) -> None:
+        for token in (None, "private-token"):
+            await self.dashboard.stop()
+            self.dashboard = Dashboard(self.manager, self.twitch,
+                                       DashboardConfig(port=0, token=token, enabled=True))
+            await self.dashboard.start()
+            self.base = f"http://127.0.0.1:{self.dashboard.port}"
+            async with self.session.ws_connect(self.base + "/api/ws") as ws:
+                if token is None:
+                    await ws.receive_json()
+                await ws.send_str("x" * 10000)
+                message = await ws.receive()
+                while message.type == WSMsgType.TEXT:
+                    message = await ws.receive()
+                self.assertIn(message.type, (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING))
+                self.assertIn(ws.close_code, (WSCloseCode.MESSAGE_TOO_BIG, WSCloseCode.POLICY_VIOLATION))
 
     async def test_state_is_delivered_during_continuous_logs(self) -> None:
         async with self.session.ws_connect(self.base + "/api/ws") as ws:
