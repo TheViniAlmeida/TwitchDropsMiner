@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from aiohttp import ClientSession, WSCloseCode, web
+from aiohttp import ClientSession, WSCloseCode, WSServerHandshakeError, web
 from aiohttp.test_utils import make_mocked_request
 
 from cli_actions import Actions, ActionRejected
@@ -600,6 +600,13 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             await ws.receive()
             self.assertEqual(ws.close_code, WSCloseCode.POLICY_VIOLATION)
         self.assertEqual(len(next(iter(self.dashboard._failures.values()))), 5)
+        # a limited address keeps a single pending handshake; extra upgrades are refused early
+        async with self.session.ws_connect(self.base + "/api/ws") as pending:
+            with self.assertRaises(WSServerHandshakeError) as refused:
+                await self.session.ws_connect(self.base + "/api/ws")
+            self.assertEqual(refused.exception.status, 429)
+            await pending.send_json({"auth": "private-token"})
+            self.assertEqual((await pending.receive_json())["type"], "state")
 
     async def test_state_is_delivered_during_continuous_logs(self) -> None:
         async with self.session.ws_connect(self.base + "/api/ws") as ws:

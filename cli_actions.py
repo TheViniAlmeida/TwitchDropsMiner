@@ -33,10 +33,17 @@ class ActionRejected(ActionError):
     """The miner declined an otherwise valid action (HTTP 409)."""
 
 
+_SENSITIVE_QUERY = frozenset((
+    "token", "access_token", "refresh_token", "id_token", "auth", "auth_token",
+    "code", "device_code", "client_secret", "password", "secret", "session", "sig", "signature",
+))
+
+
 @dataclass(frozen=True)
 class CampaignFilters:
+    # same initial state as the GUI inventory filters
     not_linked: bool = False
-    upcoming: bool = False
+    upcoming: bool = True
     expired: bool = False
     excluded: bool = False
     finished: bool = False
@@ -179,8 +186,12 @@ class Actions:
             return None
         url = URL(str(value)).with_user(None)
         if keep_query:
-            # public Twitch data (account linking pages need their query string)
-            return str(url)
+            # account linking pages need their query string, minus anything credential-like
+            query = [
+                (key, item) for key, item in url.query.items()
+                if key.casefold().replace("-", "_") not in _SENSITIVE_QUERY
+            ]
+            return str(url.with_query(query).with_fragment(None))
         return str(url.with_query(None).with_fragment(None))
 
     def _drop_data(self, drop: Any) -> dict[str, Any]:

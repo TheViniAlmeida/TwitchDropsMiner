@@ -155,7 +155,8 @@ class RoutesV2Tests(unittest.IsolatedAsyncioTestCase):
                                    DashboardConfig(host="0.0.0.0", port=0))
 
     async def call(self, path, headers=None):
-        request = make_mocked_request("GET", path, headers=headers or {}, app=self.dashboard.app)
+        headers = {"Host": f"127.0.0.1:{self.dashboard.port}", **(headers or {})}
+        request = make_mocked_request("GET", path, headers=headers, app=self.dashboard.app)
         request._match_info = await self.dashboard.app.router.resolve(request)
         handler = request.match_info.handler
         for middleware in reversed(self.dashboard.app.middlewares):
@@ -186,6 +187,20 @@ class RoutesV2Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.call(f"/api/campaigns?{key}=yes")).status, 400)
         for path in ("/api/drops", "/api/game", "/api/history?since=wrong"):
             self.assertEqual((await self.call(path)).status, 400)
+
+    async def test_host_header_blocks_dns_rebinding_on_lan_binds(self):
+        port = self.dashboard.port
+        for host in ("evil.example", f"evil.example:{port}", "127.0.0.1:1", "a@127.0.0.1"):
+            with self.subTest(host=host):
+                self.assertEqual((await self.call("/api/meta", {"Host": host})).status, 403)
+        with patch("dashboard._interface_entries", return_value=[("eth0", "192.168.1.50")]):
+            self.dashboard._hosts = None
+            self.assertEqual((await self.call("/api/meta", {"Host": f"192.168.1.50:{port}"})).status, 200)
+        self.dashboard.config = DashboardConfig(host="0.0.0.0", port=0,
+                                                origins=("https://drops.example.com",))
+        self.dashboard._hosts = None
+        self.assertEqual((await self.call("/api/meta", {"Host": "drops.example.com"})).status, 200)
+        self.assertEqual((await self.call("/api/meta", {"Host": "other.example.com"})).status, 403)
 
     async def test_auth_meta_and_rate(self):
         self.dashboard.config = DashboardConfig(host="0.0.0.0", port=0,

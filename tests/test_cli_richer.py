@@ -238,6 +238,12 @@ class LinkUrlTests(unittest.TestCase):
         from cli_actions import Actions
         self.assertEqual(
             Actions._safe_url("https://user:pw@example.com/link?game=1#x", keep_query=True),
-            "https://example.com/link?game=1#x",
+            "https://example.com/link?game=1",
         )
         self.assertEqual(Actions._safe_url("https://cdn.example/a.png?x=1"), "https://cdn.example/a.png")
+        self.assertEqual(
+            Actions._safe_url(
+                "https://example.com/link?game=1&access_token=a&Device-Code=b&code=c", keep_query=True
+            ),
+            "https://example.com/link?game=1",
+        )

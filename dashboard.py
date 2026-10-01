@@ -72,7 +72,7 @@ def _filter_ips(entries: list[tuple[str, str]]) -> list[str]:
     return sorted(addresses)
 
 
-def _local_ips() -> list[str]:
+def _interface_entries() -> list[tuple[str, str]]:
     """Inspect local interfaces without DNS or outbound packets."""
     entries: list[tuple[str, str]] = []
     if os.name == "posix":
@@ -95,7 +95,29 @@ def _local_ips() -> list[str]:
                 entries.append((fields[-1], str(ipaddress.IPv6Address(int(fields[0], 16)))))
         except (OSError, ValueError, IndexError):
             pass
-    return _filter_ips(entries)
+    return entries
+
+
+def _local_ips() -> list[str]:
+    return _filter_ips(_interface_entries())
+
+
+def _host_names(bound: str, origins: tuple[str, ...]) -> set[str]:
+    """Host header names that reach this dashboard; anything else may be DNS rebinding."""
+    names = {"localhost", "127.0.0.1", "::1", bound.casefold()}
+    if not is_loopback(bound):
+        names.update(address for _, address in _interface_entries())
+        hostname = socket.gethostname().casefold()
+        names.update((hostname, f"{hostname}.local"))
+        try:
+            # Windows has no interface listing above; resolving our own name stays local
+            names.update(socket.gethostbyname_ex(hostname)[2])
+        except OSError:
+            pass
+        names.update(urlsplit(origin).hostname or "" for origin in origins)
+    names.discard("0.0.0.0")
+    names.discard("::")
+    return {name.casefold() for name in names if name}
 
 
 @dataclass(frozen=True)
@@ -215,6 +237,8 @@ class Dashboard:
         self._site: web.TCPSite | None = None
         self._sockets: set[web.WebSocketResponse] = set()
         self._failures: dict[str, deque[float]] = {}
+        self._hosts: set[str] | None = None
+        self._pending_auth: dict[str, int] = {}
         self.history: deque[dict[str, Any]] = deque(maxlen=1440)
         self._history_task: asyncio.Task[None] | None = None
         self._history_errors: set[str] = set()
@@ -349,15 +373,32 @@ class Dashboard:
         self._secure_headers(response, request.path)
         return response
 
+    def _host_allowed(self, header: str | None) -> bool:
+        if not header:
+            return False
+        try:
+            url = urlsplit(f"http://{header}")
+            name, port = url.hostname or "", url.port
+        except ValueError:
+            return False
+        if url.username is not None or url.path or url.query or url.fragment:
+            return False
+        if port is not None and port != self.port:
+            # a port-less Host is only valid behind a configured reverse proxy origin
+            return False
+        if port is None and not any(
+            urlsplit(origin).hostname == name for origin in self.config.origins
+        ):
+            return False
+        if self._hosts is None or name not in self._hosts:
+            # interfaces change (DHCP, VPN): refresh before refusing
+            self._hosts = _host_names(self.config.host, self.config.origins)
+        return name in self._hosts
+
     @web.middleware
     async def _host(self, request: web.Request, handler: Any) -> web.StreamResponse:
-        if is_loopback(self.config.host):
-            bound = f"[{self.config.host}]" if ":" in self.config.host else self.config.host.casefold()
-            allowed = {
-                f"{host}:{self.port}" for host in ("localhost", "127.0.0.1", "[::1]", bound)
-            }
-            if request.headers.get("Host") not in allowed:
-                return self._error(403, "forbidden host")
+        if not self._host_allowed(request.headers.get("Host")):
+            return self._error(403, "forbidden host")
         return await handler(request)
 
     @web.middleware
@@ -546,6 +587,11 @@ class Dashboard:
 
     async def _ws(self, request: web.Request) -> web.StreamResponse:
         remote = request.remote or "unknown"
+        # the token arrives after the upgrade, so a limited address (maybe a shared NAT with a
+        # valid user) keeps one pending handshake instead of being locked out
+        pending_cap = 1 if self._limited(remote) else 4
+        if self.config.token is not None and self._pending_auth.get(remote, 0) >= pending_cap:
+            return self._error(429, "too many attempts")
         ws = web.WebSocketResponse(heartbeat=20)
         self._secure_headers(ws, request.path)
         await ws.prepare(request)
@@ -554,11 +600,17 @@ class Dashboard:
         sender = None
         try:
             if self.config.token is not None:
+                self._pending_auth[remote] = self._pending_auth.get(remote, 0) + 1
                 try:
                     message = await ws.receive(timeout=self.config.auth_timeout)
                     data = json.loads(message.data) if message.type == WSMsgType.TEXT else None
                 except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
                     data = None
+                finally:
+                    if self._pending_auth[remote] <= 1:
+                        del self._pending_auth[remote]
+                    else:
+                        self._pending_auth[remote] -= 1
                 if not isinstance(data, dict) or not isinstance(data.get("auth"), str) or not self._matches(data["auth"]):
                     if not self._limited(remote):
                         self._failed(remote)

@@ -191,6 +191,8 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("CODE-123", "\n".join(self.manager.log_tail()))
         self.assertIn("device-code=<redacted>", "\n".join(self.manager.log_tail()))
         self.assertTrue(self.manager.log_tail(1)[0].endswith("Enter this code: <redacted>"))
+        self.manager.print("Login successful, user ID: 123456789")
+        self.assertTrue(self.manager.log_tail(1)[0].endswith("user ID: <redacted>"))
 
     async def test_encoded_device_code_url_is_masked_in_log_events(self) -> None:
         events = []

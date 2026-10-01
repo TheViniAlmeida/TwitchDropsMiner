@@ -4,7 +4,8 @@ const $ = (id) => document.getElementById(id);
 const SVG = 'http://www.w3.org/2000/svg';
 const pages = ['overview', 'inventory', 'games', 'channels', 'settings', 'logs'];
 const filterNames = ['not_linked', 'upcoming', 'expired', 'excluded', 'finished'];
-const filterState = Object.fromEntries(filterNames.map((name) => [name, false]));
+// same initial state as the GUI inventory filters
+const filterState = Object.fromEntries(filterNames.map((name) => [name, name === 'upcoming']));
 const cache = new Map();
 let auth = false;
 let token = '';

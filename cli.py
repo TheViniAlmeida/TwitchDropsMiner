@@ -41,6 +41,15 @@ _DEVICE_CODE_QUERY = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
 _command_writer: ContextVar[Callable[[str], None] | None] = ContextVar("command_writer", default=None)
 
 
+_USER_ID = re.compile(r"(user ID: )\d+", re.IGNORECASE)
+
+
+def _redact(line: str) -> str:
+    if line.startswith("Enter this code: "):
+        return "Enter this code: <redacted>"
+    return _USER_ID.sub(r"\1<redacted>", _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line))
+
+
 def _redact_device_code_query(match: re.Match[str]) -> str:
     if unquote(match.group(2)).casefold() == "device-code":
         return f"{match.group(1)}{match.group(2)}=<redacted>"
@@ -399,18 +408,10 @@ class CLIManager:
             output = f"{stamp}: {line}"
             if writer is not None:
                 # remote output is a command reply: no timestamp
-                writer(
-                    "Enter this code: <redacted>"
-                    if line.startswith("Enter this code: ")
-                    else _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line)
-                )
+                writer(_redact(line))
                 continue
             sys.stdout.write(f"{output}\n")
-            recorded = (
-                f"{stamp}: Enter this code: <redacted>"
-                if line.startswith("Enter this code: ")
-                else _DEVICE_CODE_QUERY.sub(_redact_device_code_query, output)
-            )
+            recorded = f"{stamp}: {_redact(line)}"
             self._logs.append(recorded)
             self._notify("log", recorded)
         sys.stdout.flush()
