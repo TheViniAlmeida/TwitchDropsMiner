@@ -76,7 +76,7 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         campaign = SimpleNamespace(
             id="campaign1", name="Campaign", game=SimpleNamespace(name="Game"),
             progress=0.5, claimed_drops=0, total_drops=1, starts_at=now, ends_at=now,
-            image_url=URL("https://static-cdn.jtvnw.net/game.jpg"), finished=False,
+            image_url=URL("https://static-cdn.jtvnw.net/game.jpg?secret=1"), finished=False,
             expired=False, drops=[drop],
         )
         drop.campaign = campaign
@@ -91,6 +91,7 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshots[0]["current_drop"]["remaining_minutes"], 5)
         self.assertEqual(snapshots[1][0]["watching"], True)
         self.assertEqual(snapshots[2][0]["drops"][0]["progress"], 0.5)
+        self.assertEqual(snapshots[2][0]["image_url"], "https://static-cdn.jtvnw.net/game.jpg")
         self.assertEqual(snapshots[3], ["Alpha", "Zed"])
 
         campaign.finished = True
@@ -217,6 +218,30 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("CODE-123", "\n".join(self.manager.log_tail()))
         self.assertIn("device-code=<redacted>", "\n".join(self.manager.log_tail()))
         self.assertTrue(self.manager.log_tail(1)[0].endswith("Enter this code: <redacted>"))
+        self.manager.print("Login successful, user ID: 123456789")
+        self.assertTrue(self.manager.log_tail(1)[0].endswith("user ID: <redacted>"))
+        self.manager.print("Websocket[0]: Adding topics: user-drop-events.123456789, onsite-notifications.123456789")
+        self.assertNotIn("123456789", self.manager.log_tail(1)[0])
+        self.assertIn("user-drop-events.<redacted>", self.manager.log_tail(1)[0])
+        self.assertNotIn("123456789", self.output.getvalue())
+
+    def test_id_filter_redacts_records_for_every_handler(self) -> None:
+        import logging
+        from cli import IdRedactingFilter
+        record = logging.LogRecord("TwitchDrops", logging.INFO, __file__, 1,
+                                   "Adding topics: %s", ("user-drop-events.987654321",), None)
+        self.assertTrue(IdRedactingFilter().filter(record))
+        self.assertEqual(record.getMessage(), "Adding topics: user-drop-events.<redacted>")
+        from cli import redact_ids
+        self.assertEqual(redact_ids("Drop claim ID: 123456789#abc-def#99887766"),
+                         "Drop claim ID: <id>#abc-def#<id>")
+        self.assertEqual(redact_ids('{"user_id": "123456789", "current_progress_min": 225}'),
+                         '{"user_id": "<id>", "current_progress_min": 225}')
+        self.assertEqual(redact_ids('{"user_id":1234567,"channel_id":7654321}'),
+                         '{"user_id":<id>,"channel_id":<id>}')
+        self.assertEqual(redact_ids("http://[::1]:23450/ localhost:23451"), "http://[::1]:23450/ localhost:23451")
+        self.assertEqual(redact_ids("Tier 1 (For Honor, 25/60) v15.3 1.2345678 http://127.0.0.1:23450/"),
+                         "Tier 1 (For Honor, 25/60) v15.3 1.2345678 http://127.0.0.1:23450/")
 
     async def test_encoded_device_code_url_is_masked_in_log_events(self) -> None:
         events = []

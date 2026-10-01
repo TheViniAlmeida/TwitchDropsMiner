@@ -34,7 +34,11 @@ class RedactionTests(unittest.TestCase):
                                            "device_code": "<redacted>", "other": "public"})
         self.assertTrue(all(value == "<redacted>" for value in redacted["json"].values()))
         self.assertTrue(all(value == "<redacted>" for value in redacted["params"].values()))
-        self.assertEqual(redacted["proxy"], "http://alice:***@localhost:8080")
+        self.assertEqual(redacted["proxy"], "http://***:***@localhost:8080")
+        self.assertEqual(_redacted_request_kwargs({"proxy": URL("http://proxy:8080/?token=sample")})["proxy"],
+                         "http://proxy:8080/?***")
+        self.assertEqual(_redacted_request_kwargs({"proxy": URL("http://proxy:8080")})["proxy"],
+                         "http://proxy:8080")
         self.assertEqual(redacted["auth"], "<redacted>")
         self.assertEqual(redacted["proxy_auth"], "<redacted>")
         redacted_repr = repr(redacted)
@@ -46,12 +50,23 @@ class RedactionTests(unittest.TestCase):
         self.assertIsNot(redacted, kwargs)
         self.assertIsNot(redacted["headers"], kwargs["headers"])
 
+    def test_masked_proxy_cannot_be_saved_back(self) -> None:
+        from cli_commands import CommandError, set_setting
+        settings = SimpleNamespace(proxy=URL("http://alice:sample@localhost:8080"))
+        with self.assertRaises(CommandError):
+            set_setting(settings, "proxy", "http://alice:***@localhost:8080")
+        self.assertEqual(settings.proxy.password, "sample")
+
     def test_setting_value_masks_proxy_password(self) -> None:
         proxy = URL("http://alice:sample@localhost:8080")
         settings = SimpleNamespace(proxy=proxy)
-        self.assertEqual(setting_value(settings, "proxy"), "http://alice:***@localhost:8080")
+        self.assertEqual(setting_value(settings, "proxy"), "http://***:***@localhost:8080")
+        self.assertEqual(setting_value(SimpleNamespace(proxy=URL("http://token-user@proxy:8080")), "proxy"),
+                         "http://***@proxy:8080")
         self.assertEqual(settings.proxy, proxy)
         self.assertEqual(settings.proxy.password, "sample")
+        settings.proxy = URL("http://proxy:8080/?token=sample#frag")
+        self.assertEqual(setting_value(settings, "proxy"), "http://proxy:8080/?***")
 
     def test_websocket_log_copy_masks_auth_token(self) -> None:
         message = {"type": "LISTEN", "data": {"auth_token": "sample", "topics": ["a"]}}

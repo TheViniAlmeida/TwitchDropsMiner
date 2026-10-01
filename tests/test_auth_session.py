@@ -306,6 +306,27 @@ class AuthCommandTests(unittest.TestCase):
             self.assertIn("auth error: cannot read the session file", self.errors.getvalue())
         self.assertNotIn("secret", self.output.getvalue() + self.errors.getvalue())
 
+    def test_forwarded_logout_is_refused_before_reaching_the_miner(self) -> None:
+        args = SimpleNamespace(command="logout", yes=True)
+        with patch.object(cli_commands, "lock_file", return_value=(False, self.lock)), \
+                patch("control.send_command", new_callable=AsyncMock) as send, \
+                patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TDM_ALLOW_LOGOUT", None)
+            self.assertEqual(cli_commands.run_offline(args), 2)
+        send.assert_not_awaited()
+        self.assertIn("logout disabled", self.errors.getvalue())
+
+    def test_ctl_logout_any_case_is_refused_before_reaching_the_miner(self) -> None:
+        for words in (["logout"], ["LOGOUT"], ["LogOut"]):
+            args = SimpleNamespace(command="ctl", y=True, words=words)
+            with patch("control.open_control", new_callable=AsyncMock) as open_control, \
+                    patch("control.send_command", new_callable=AsyncMock) as send, \
+                    patch.dict(os.environ, {}, clear=False):
+                open_control.return_value = (Mock(), Mock(close=Mock(), wait_closed=AsyncMock()))
+                os.environ.pop("TDM_ALLOW_LOGOUT", None)
+                self.assertEqual(cli_commands.run_control_client(args), 2, words)
+            send.assert_not_awaited()
+
     def test_backup_restore_commands_and_lock(self) -> None:
         self.assertEqual(self.run_auth("backup"), 2)
         auth_session.write_session("original", "1", ClientType.ANDROID_APP, self.path)
@@ -315,8 +336,9 @@ class AuthCommandTests(unittest.TestCase):
         self.assertEqual(auth_session.read_token(self.path)[0], "original")
         self.assertEqual(self.path.with_name("cookies.jar.bak.prev").read_bytes(), b"replacement")
         with patch.object(cli_commands, "lock_file", return_value=(False, self.lock)):
-            self.assertEqual(self.run_auth("backup"), 3)
-        self.assertIn("The miner is running; use the interactive console instead.", self.errors.getvalue())
+            self.assertEqual(self.run_auth("backup"), 0)
+            self.assertEqual(self.run_auth("restore"), 3)
+        self.assertIn("The miner is running; stop it before replacing the saved session.", self.errors.getvalue())
 
 
 class ValidateTests(unittest.IsolatedAsyncioTestCase):

@@ -90,8 +90,14 @@ def _redacted_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             }
         elif name == "proxy" and value:
             proxy = URL(value)
+            # some providers put the credential in the user name: mask both parts
+            if proxy.user is not None:
+                proxy = proxy.with_user("***")
             if proxy.password is not None:
-                redacted[name] = str(proxy.with_password("***"))
+                proxy = proxy.with_password("***")
+            # a proxy query may carry a credential too
+            masked = str(proxy.with_query(None).with_fragment(None))
+            redacted[name] = f"{masked}?***" if proxy.query_string or proxy.fragment else masked
         elif name in ("auth", "proxy_auth") and value is not None:
             redacted[name] = "<redacted>"
         elif name == "cookies":
@@ -561,7 +567,7 @@ class _AuthState:
                 raise RuntimeError("Login verification failure (step #1)")
             self.user_id = int(validate_response["user_id"])
             cookie["persistent"] = str(self.user_id)
-            logger.info(f"Login successful, user ID: {self.user_id}")
+            logger.info("Login successful")
             login_form.update(_("gui", "login", "logged_in"), self.user_id)
             # update our cookie and save it
             jar.update_cookies(cookie, client_info.CLIENT_URL)
@@ -592,6 +598,8 @@ class Twitch:
         self._jar_load_failed: bool = False
         self._campaigns: dict[str, DropsCampaign] = {}
         self._mnt_triggers: deque[datetime] = deque()
+        # game name -> last time we warned that another session is earning it
+        self._foreign_progress_warned: dict[str, float] = {}
         # NOTE: GQL is pretty volatile and breaks everything if one runs into their rate limit.
         # Do not modify the default, safe values.
         self._qgl_limiter = RateLimiter(capacity=5, window=1)
@@ -1375,9 +1383,29 @@ class Twitch:
         else:
             drop_text = "<Unknown>"
         logger.log(CALL, f"Drop update from websocket: {drop_text}")
-        if drop is not None and drop.can_earn(self.watching_channel.get_with_default(None)):
+        watching_channel = self.watching_channel.get_with_default(None)
+        if drop is not None and drop.can_earn(watching_channel):
             # the received payload is for the drop we expected
             drop.update_minutes(message["data"]["current_progress_min"])
+        elif drop is not None and watching_channel is not None:
+            self._warn_foreign_progress(drop)
+
+    def _warn_foreign_progress(self, drop: TimedDrop) -> None:
+        # Twitch credits watch time to one stream per account: progress on a drop we are not
+        # mining means another session (browser, phone, other miner) takes the credit
+        game = str(drop.campaign.game)
+        now = time()
+        last = self._foreign_progress_warned.get(game)
+        if last is not None and now - last < 1800:
+            return
+        self._foreign_progress_warned[game] = now
+        message = (
+            f"Another session of this account is earning {game} ({drop.name}); "
+            "Twitch credits only one stream at a time, so this miner's progress is paused. "
+            "Stop other miners or players using this account."
+        )
+        # one publication path: in CLI mode a logged warning would reach the console twice
+        self.print(message)
 
     @task_wrapper
     async def process_notifications(self, user_id: int, message: JsonType):
