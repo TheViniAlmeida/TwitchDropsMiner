@@ -84,7 +84,8 @@ mode hides controls and rejects changes. Host and Origin checks protect the API;
 `TDM_DASHBOARD_ORIGINS` to comma-separated exact origins when a reverse proxy rewrites Host.
 `--dashboard-tls` serves HTTPS so the token and the panel do not cross the network in clear text. Without a
 certificate of your own, `openssl` creates a self-signed pair once in `TDM_DATA_DIR/dashboard-tls`
-(key `0600`) for `localhost`, the host name and the local IPs. Startup prints its SHA-256
+(key `0600`) for `localhost`, the host name, its addresses, the local IPs and the hosts in
+`TDM_DASHBOARD_ORIGINS`. Startup prints its SHA-256
 fingerprint: compare it with the one the browser shows on its first warning before accepting it.
 The pair is made again when the host name, the bound host or a local IP is no longer covered, or
 30 days before it expires (it lasts 825 days), so the browser asks once more. A given key must not be readable by other users; on Windows its ACL

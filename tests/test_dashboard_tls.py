@@ -53,7 +53,8 @@ class TLSConfigTests(unittest.TestCase):
 
 class SubjectAltNameTests(unittest.TestCase):
     def test_names_and_addresses_are_validated(self) -> None:
-        san = subject_alt_names(["192.168.1.5", "bad,value", "0.0.0.0", "fe80::1"], "0.0.0.0")
+        san = subject_alt_names(["192.168.1.5", "bad,value", "0.0.0.0", "fe80::1", "fe80::2%eth0"], "0.0.0.0")
+        self.assertNotIn("fe80::2", san)
         entries = san.split(",")
         for entry in ("DNS:localhost", "IP:127.0.0.1", "IP:::1", "IP:192.168.1.5", "IP:fe80::1"):
             self.assertIn(entry, entries)
@@ -198,14 +199,19 @@ class TLSStartFailureTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 patch("dashboard.DATA_DIR", Path(directory)), \
                 patch("dashboard._interface_entries", return_value=[("eth0", "fd12::5")]), \
-                patch("dashboard.socket.gethostbyname_ex", return_value=("host", [], ["10.9.8.7"])):
+                patch("dashboard.socket.getaddrinfo", return_value=[
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.9.8.7", 0)),
+                    (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::7", 0, 0, 0))]):
             manager = FakeManager()
             manager.actions = Actions(FakeTwitch(), manager)
-            dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig(port=0, enabled=True, tls=True))
+            dashboard = Dashboard(manager, FakeTwitch(), DashboardConfig(
+                port=0, enabled=True, tls=True, origins=("https://[2001:db8::9]:23450", "https://panel.lan")))
             dashboard._tls()
             names = json.loads((Path(directory) / "dashboard-tls" / "pair.json").read_text())["names"]
             # a unique-local IPv6 address is hidden from the startup listing but still needs a SAN
             self.assertIn("IP:fd12::5", names)
+            for entry in ("IP:2001:db8::7", "IP:2001:db8::9", "DNS:panel.lan"):
+                self.assertIn(entry, names)
             self.assertIn("IP:10.9.8.7", json.loads((Path(directory) / "dashboard-tls" / "pair.json").read_text())["names"])
 
     @unittest.skipIf(OPENSSL is None, "openssl is not installed")

@@ -302,10 +302,12 @@ class Dashboard:
                 # every interface, unlike the startup listing: any address that reaches us needs a SAN
                 addresses = [address for _, address in _interface_entries()]
                 try:
-                    # Windows has no interface listing: resolving our own name stays local
-                    addresses += socket.gethostbyname_ex(socket.gethostname())[2]
-                except OSError:
+                    # Windows and macOS list few or no interfaces here: our own name adds IPv4 and IPv6
+                    addresses += [info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)]
+                except (OSError, UnicodeError):
                     pass
+                # hosts the operator declared for this dashboard must be valid names too
+                addresses += [urlsplit(origin).hostname or "" for origin in self.config.origins]
                 cert, key = self_signed_pair(DATA_DIR / "dashboard-tls", addresses, self.config.host)
             return server_context(cert, key), fingerprint(cert)
         except TLSError as exc:

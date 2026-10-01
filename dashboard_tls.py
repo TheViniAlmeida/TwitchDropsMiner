@@ -33,15 +33,17 @@ def subject_alt_names(addresses: list[str], bound: str) -> str:
     hostname = socket.gethostname()
     if _DNS_NAME.fullmatch(hostname):
         names.update((hostname.casefold(), f"{hostname.casefold()}.local"))
-    if _DNS_NAME.fullmatch(bound) and not bound.replace(".", "").isdigit():
-        names.add(bound.casefold())
     ips = {"127.0.0.1", "::1"}
+    # addresses may also carry host names (declared origins): each value is an IP or a DNS name
     for value in (*addresses, bound):
         try:
             address = ipaddress.ip_address(value)
         except ValueError:
+            if _DNS_NAME.fullmatch(value) and not value.replace(".", "").isdigit():
+                names.add(value.casefold())
             continue
-        if not address.is_unspecified:
+        # a zoned address (fe80::1%eth0) is no valid SAN and would make openssl fail
+        if not address.is_unspecified and getattr(address, "scope_id", None) is None:
             ips.add(str(address))
     return ",".join([*(f"DNS:{name}" for name in sorted(names)), *(f"IP:{ip}" for ip in sorted(ips))])
 
