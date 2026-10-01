@@ -54,8 +54,10 @@ def _jar_token(jar: aiohttp.CookieJar) -> str | None:
 def save_jar(jar: aiohttp.CookieJar, path: Path = COOKIES_PATH) -> None:
     """Atomically save the jar; never drop a saved session without a backup of it."""
     path = Path(path)
-    saved = _file_token(path) if path.is_file() else None
-    if saved is not None and _jar_token(jar) != saved:
+    existing = path.is_file() and path.stat().st_size > 0
+    saved = _file_token(path) if existing else None
+    # an unreadable file may still hold a valid session: keep a copy before replacing it
+    if existing and (saved is None or _jar_token(jar) != saved):
         # raises OSError when the backup cannot be written: the saved file stays untouched
         backup_session(path)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -153,6 +155,8 @@ def restore_session(path: Path = COOKIES_PATH) -> tuple[Path, Path]:
     backup = path.with_name(path.name + ".bak")
     if not backup.is_file() or backup.stat().st_size == 0:
         raise ValueError("no saved session backup")
+    if _file_token(backup) is None:
+        raise ValueError("the saved session backup is unreadable; nothing was changed")
     previous = path.with_name(path.name + ".bak.prev")
     if previous.is_file() and not _same_token(path, previous) and not _same_token(backup, previous):
         # a second restore must not lose the session kept by the first one

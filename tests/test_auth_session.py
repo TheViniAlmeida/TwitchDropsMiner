@@ -61,7 +61,9 @@ class SessionFileTests(unittest.TestCase):
             self.path.write_bytes(b"old")
             with patch("auth_session.os.replace", wraps=os.replace) as replace:
                 auth_session.save_jar(jar, self.path)
-            self.assertEqual(replace.call_count, 1)
+            # the unreadable "old" file is archived first, then the jar replaces it
+            self.assertEqual(replace.call_count, 2)
+            self.assertEqual(Path(replace.call_args.args[1]), self.path)
             self.assertNotEqual(Path(replace.call_args.args[0]), self.path)
             self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
             saved = self.path.read_bytes()
@@ -127,6 +129,19 @@ class SessionFileTests(unittest.TestCase):
         self.assertEqual(auth_session.read_token(backup)[0], "valid-secret")
         with self.assertRaisesRegex(ValueError, "cannot read the session file"):
             auth_session.read_token(self.path)
+
+    def test_unreadable_jar_is_copied_before_save_and_bad_backup_never_restored(self) -> None:
+        self.path.write_bytes(b"unreadable but maybe valid")
+        with auth_session._cookie_jar() as jar:
+            jar.update_cookies({"auth-token": "new-secret"}, ClientType.ANDROID_APP.CLIENT_URL)
+            auth_session.save_jar(jar, self.path)
+        copies = list(self.path.parent.glob("cookies.jar.bak.[0-9]*"))
+        self.assertEqual([copy.read_bytes() for copy in copies], [b"unreadable but maybe valid"])
+        backup = self.path.with_name("cookies.jar.bak")
+        backup.write_bytes(b"corrupt backup")
+        with self.assertRaisesRegex(ValueError, "unreadable"):
+            auth_session.restore_session(self.path)
+        self.assertEqual(auth_session.read_token(self.path)[0], "new-secret")
 
     def test_second_restore_keeps_the_first_previous_session(self) -> None:
         auth_session.write_session("backup", "1", ClientType.ANDROID_APP, self.path)
