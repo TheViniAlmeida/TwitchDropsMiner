@@ -80,6 +80,16 @@ function image(url, label) {
   return picture;
 }
 
+// every state update (HTTP or WebSocket) goes through here
+function setState(next) {
+  state = next;
+  if (!filtersChosen && state.default_filters) {
+    // same initial filters as the GUI until the viewer picks their own
+    for (const name of filterNames) if (typeof state.default_filters[name] === 'boolean') filterState[name] = state.default_filters[name];
+  }
+  readonly = Boolean(state.readonly);
+}
+
 function bar(progress) {
   const fraction = Math.max(0, Math.min(1, Number(progress) || 0));
   // an SVG rect width attribute keeps the page free of inline styles
@@ -208,12 +218,7 @@ function connect() {
     try { data = JSON.parse(event.data); } catch { return; }
     if (data.type === 'state') {
       const { type, ...nextState } = data;
-      state = nextState;
-      if (!filtersChosen && state.default_filters) {
-        // same initial filters as the GUI until the viewer picks their own
-        for (const name of filterNames) if (typeof state.default_filters[name] === 'boolean') filterState[name] = state.default_filters[name];
-      }
-      readonly = Boolean(state.readonly);
+      setState(nextState);
       $('miner-state').textContent = state.state || 'Unknown';
       $('readonly-badge').hidden = !readonly;
       renderPage();
@@ -655,7 +660,7 @@ async function start() {
     persist(sessionStorage, 'dashboardToken', token);
     $('auth-panel').hidden = true;
     $('dashboard').hidden = false;
-    run(async () => { state = await api('/api/state'); readonly = Boolean(state.readonly); $('readonly-badge').hidden = !readonly; $('miner-state').textContent = state.state || 'Unknown'; await renderPage(); connect(); });
+    run(async () => { setState(await api('/api/state')); $('readonly-badge').hidden = !readonly; $('miner-state').textContent = state.state || 'Unknown'; await renderPage(); connect(); });
   });
   window.addEventListener('hashchange', navigate);
   navigate();
@@ -666,8 +671,7 @@ async function start() {
     $('readonly-badge').hidden = !readonly;
     if (auth) token = stored(sessionStorage, 'dashboardToken') || '';
     if (auth && !token) { showAuth(); return; }
-    state = await api('/api/state');
-    readonly = Boolean(state.readonly);
+    setState(await api('/api/state'));
     $('miner-state').textContent = state.state || 'Unknown';
     $('readonly-badge').hidden = !readonly;
     $('dashboard').hidden = false;
