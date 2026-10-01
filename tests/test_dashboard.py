@@ -633,6 +633,41 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
                 await valid.send_json({"auth": "private-token"})
                 self.assertEqual((await valid.receive_json())["type"], "state")
 
+    async def test_concurrent_upgrades_cannot_pass_the_pending_cap(self) -> None:
+        from unittest.mock import patch
+        from aiohttp import web as aiohttp_web
+        await self.dashboard.stop()
+        self.dashboard = Dashboard(self.manager, self.twitch,
+                                   DashboardConfig(port=0, token="private-token", enabled=True,
+                                                   auth_timeout=0.5))
+        await self.dashboard.start()
+        self.base = f"http://127.0.0.1:{self.dashboard.port}"
+        for _ in range(5):
+            async with self.session.get(self.base + "/api/state") as response:
+                self.assertEqual(response.status, 401)
+        real_prepare = aiohttp_web.WebSocketResponse.prepare
+
+        async def slow_prepare(ws, request):
+            # both upgrades sit between the cap check and the handshake at once
+            await asyncio.sleep(0.2)
+            return await real_prepare(ws, request)
+
+        async def attempt():
+            try:
+                ws = await self.session.ws_connect(self.base + "/api/ws")
+            except WSServerHandshakeError as exc:
+                return exc.status
+            await ws.close()
+            return 101
+
+        with patch.object(aiohttp_web.WebSocketResponse, "prepare", slow_prepare), \
+                patch("dashboard._WS_LIMITED_FAILURE_DELAY", 0.05):
+            results = await asyncio.gather(attempt(), attempt())
+            self.assertEqual(sorted(results), [101, 429])
+            # the unauthenticated close is a failed guess: its slot frees after the delay
+            await asyncio.sleep(0.4)
+        self.assertEqual(self.dashboard._pending_auth, {})
+
     async def test_websocket_rejects_oversized_frames(self) -> None:
         for token in (None, "private-token"):
             await self.dashboard.stop()

@@ -169,7 +169,12 @@ class ControlServer:
 
         def send(line: str) -> None:
             safe_line = line.encode("utf-8")[:MAX_LINE].decode("utf-8", errors="ignore")
-            stream.write(_packet({"line": safe_line}))
+            packet = _packet({"line": safe_line})
+            while len(packet) > MAX_REQUEST:
+                # JSON escaping can grow a line past the reader limit: shorten until it fits
+                safe_line = safe_line[: len(safe_line) // 2]
+                packet = _packet({"line": safe_line})
+            stream.write(packet)
 
         try:
             if self.tcp:

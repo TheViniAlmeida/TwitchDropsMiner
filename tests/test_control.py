@@ -94,6 +94,14 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_escaped_long_line_fits_the_client_reader(self) -> None:
+        # every quote doubles once JSON-escaped, so the raw cap alone overflows the packet
+        self.manager._command_progress = lambda: self.manager.print('"' * 16000)
+        output: list[str] = []
+        self.assertEqual(await send_command(self.data_dir, "progress", output=output.append), 0)
+        self.assertTrue(output)
+        self.assertTrue(set(output[0]) <= {'"'})
+
     async def test_watch_stop_and_disconnect(self) -> None:
         self.manager._command_progress = lambda: self.manager.print("tick")
         reader, writer = await open_control(self.data_dir)

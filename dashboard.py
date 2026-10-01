@@ -605,18 +605,35 @@ class Dashboard:
         # the token arrives after the upgrade, so a limited address (maybe a shared NAT with a
         # valid user) keeps one pending handshake instead of being locked out
         pending_cap = 1 if self._limited(remote) else 4
-        if self.config.token is not None and self._pending_auth.get(remote, 0) >= pending_cap:
-            return self._error(429, "too many attempts")
+        reserved = self.config.token is not None
+        if reserved:
+            if self._pending_auth.get(remote, 0) >= pending_cap:
+                return self._error(429, "too many attempts")
+            # reserve before the first await so concurrent upgrades cannot all pass the check
+            self._pending_auth[remote] = self._pending_auth.get(remote, 0) + 1
+
+        def release() -> None:
+            nonlocal reserved
+            if reserved:
+                reserved = False
+                if self._pending_auth[remote] <= 1:
+                    del self._pending_auth[remote]
+                else:
+                    self._pending_auth[remote] -= 1
+
         # clients only ever send the small auth frame: refuse anything larger
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=_WS_MAX_MESSAGE)
         self._secure_headers(ws, request.path)
-        await ws.prepare(request)
+        try:
+            await ws.prepare(request)
+        except BaseException:
+            release()
+            raise
         self._sockets.add(ws)
         listener = None
         sender = None
         try:
             if self.config.token is not None:
-                self._pending_auth[remote] = self._pending_auth.get(remote, 0) + 1
                 try:
                     try:
                         message = await ws.receive(timeout=self.config.auth_timeout)
@@ -633,10 +650,7 @@ class Dashboard:
                         await ws.close(code=WSCloseCode.POLICY_VIOLATION)
                         return ws
                 finally:
-                    if self._pending_auth[remote] <= 1:
-                        del self._pending_auth[remote]
-                    else:
-                        self._pending_auth[remote] -= 1
+                    release()
             await ws.send_json({"type": "state", **self._sanitize(self._state())})
             pending_logs: deque[str] = deque(maxlen=100)
             changed = False
