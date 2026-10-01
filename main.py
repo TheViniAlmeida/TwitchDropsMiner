@@ -122,6 +122,10 @@ if __name__ == "__main__":
         cli_subparsers = cli_parser.add_subparsers(dest="command")
         run_parser = cli_subparsers.add_parser("run")
         run_parser.add_argument("--open-browser", action="store_true")
+        run_parser.add_argument("--dashboard", action="store_true")
+        run_parser.add_argument("--dashboard-host")
+        run_parser.add_argument("--dashboard-port")
+        run_parser.add_argument("--dashboard-readonly", action="store_true")
         settings_parser = cli_subparsers.add_parser("settings")
         settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
         settings_subparsers.add_parser("show")
@@ -155,6 +159,16 @@ if __name__ == "__main__":
             from cli_commands import run_offline
 
             sys.exit(run_offline(args))
+        if args.command == "run":
+            from dashboard import Dashboard, DashboardError, resolve_dashboard_config
+
+            try:
+                dashboard_config = resolve_dashboard_config(args)
+            except argparse.ArgumentError as exc:
+                parser.error(str(exc))
+            except DashboardError as exc:
+                print(str(exc), file=sys.stderr)
+                sys.exit(1)
     else:
         import tkinter as tk
         from tkinter import messagebox
@@ -245,10 +259,17 @@ if __name__ == "__main__":
                 signal.SIGINT,
                 lambda *_: loop.call_soon_threadsafe(client.gui.close),
             )
+        dashboard = None
         try:
+            if cli_mode and dashboard_config.enabled:
+                dashboard = Dashboard(client.gui, client, dashboard_config)
+                await dashboard.start()
             await client.run()
             if cli_mode and not client.gui.close_requested:
                 exit_status = 1
+        except DashboardError as exc:
+            exit_status = 1
+            client.print(str(exc))
         except CaptchaRequired:
             exit_status = 1
             client.prevent_close()
@@ -267,7 +288,12 @@ if __name__ == "__main__":
             client.print(_("gui", "status", "exiting"))
             if cli_mode:
                 try:
-                    await asyncio.wait_for(client.shutdown(), timeout=10)
+                    async def shutdown_cli():
+                        if dashboard is not None:
+                            await dashboard.stop()
+                        await client.shutdown()
+
+                    await asyncio.wait_for(shutdown_cli(), timeout=10)
                 except asyncio.TimeoutError:
                     client.print("Shutdown timed out.")
                     try:
