@@ -4,6 +4,7 @@ import asyncio
 from collections import OrderedDict
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, Mock
 
 from cli import CLIManager
 from constants import State
@@ -82,3 +83,35 @@ class ConsoleDispatcherTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.dispatch_command("reload extra")
         self.assertEqual(len(self.messages), 3)
         self.assertTrue(all(message.startswith("error:") for message in self.messages))
+
+    async def test_logout_restarts_after_success_or_http_error(self) -> None:
+        for status in (200, 400):
+            with self.subTest(status=status):
+                auth = SimpleNamespace(access_token="sample", invalidate=Mock())
+                self.twitch.get_auth = AsyncMock(return_value=auth)
+                self.twitch._client_type = SimpleNamespace(CLIENT_ID="test-client")
+                response = SimpleNamespace(status=status)
+
+                class RequestContext:
+                    async def __aenter__(self):
+                        return response
+
+                    async def __aexit__(self, *_):
+                        return None
+
+                self.twitch.request = Mock(return_value=RequestContext())
+                self.twitch.states.clear()
+                self.messages.clear()
+                await self.manager._logout()
+
+                self.twitch.request.assert_called_once_with(
+                    "POST", "https://id.twitch.tv/oauth2/revoke",
+                    data={"client_id": "test-client", "token": "sample"},
+                )
+                if status == 200:
+                    auth.invalidate.assert_called_once_with(delete_cookies=True)
+                    self.assertEqual(self.messages, ["logged out"])
+                else:
+                    auth.invalidate.assert_not_called()
+                    self.assertEqual(self.messages, ["error: logout failed (HTTP 400)"])
+                self.assertEqual(self.twitch.states, [State.RESTART])

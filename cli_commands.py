@@ -43,6 +43,10 @@ def setting_value(settings: Settings, key: str) -> str:
     if key not in SETTING_KEYS:
         raise CommandError(f"unknown setting: {key}")
     value = getattr(settings, key)
+    if key == "proxy" and value:
+        proxy = URL(value)
+        if proxy.password is not None:
+            return str(proxy.with_password("***"))
     if isinstance(value, PriorityMode):
         return value.name.lower()
     if isinstance(value, bool):

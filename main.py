@@ -239,8 +239,16 @@ if __name__ == "__main__":
         if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
             loop.add_signal_handler(signal.SIGINT, lambda *_: client.gui.close())
             loop.add_signal_handler(signal.SIGTERM, lambda *_: client.gui.close())
+        elif cli_mode and sys.platform == "win32":
+            previous_sigint = signal.getsignal(signal.SIGINT)
+            signal.signal(
+                signal.SIGINT,
+                lambda *_: loop.call_soon_threadsafe(client.gui.close),
+            )
         try:
             await client.run()
+            if cli_mode and not client.gui.close_requested:
+                exit_status = 1
         except CaptchaRequired:
             exit_status = 1
             client.prevent_close()
@@ -254,6 +262,8 @@ if __name__ == "__main__":
             if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
                 loop.remove_signal_handler(signal.SIGINT)
                 loop.remove_signal_handler(signal.SIGTERM)
+            elif cli_mode and sys.platform == "win32":
+                signal.signal(signal.SIGINT, previous_sigint)
             client.print(_("gui", "status", "exiting"))
             if cli_mode:
                 try:
@@ -308,6 +318,11 @@ if __name__ == "__main__":
                 except SystemExit as exc:
                     cli_exit_status = int(exc.code or 0)
                 finally:
+                    pending = asyncio.all_tasks(loop)
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    loop.run_until_complete(loop.shutdown_asyncgens())
                     loop.close()
         else:
             asyncio.run(main())
