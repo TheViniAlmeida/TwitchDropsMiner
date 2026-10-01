@@ -65,6 +65,26 @@ def _remote_command(args: Any) -> list[str]:
     ) + ([args.position] if action == "move" else [])
 
 
+JSON_COMMANDS = (
+    "status, channels, inventory [all], games [--names], campaigns, drops <name>, game <name>, "
+    "progress, settings, get [key], priority, exclude, filters"
+)
+_JSON_READS = {"status", "channels", "inventory", "games", "campaigns", "drops", "game",
+               "progress", "settings", "get"}
+
+
+def json_command_allowed(words: list[str]) -> bool:
+    """Whether a command is read-only even on a miner that ignores the JSON flag."""
+    if not words:
+        return False
+    command, values = words[0].casefold(), words[1:]
+    if command in ("priority", "exclude"):
+        return [value.casefold() for value in values] in ([], ["list"])
+    if command == "filters":
+        return not values
+    return command in _JSON_READS
+
+
 def run_control_client(args: Any) -> int:
     from control import ControlUnavailable, open_control, quote_command, send_command
 
@@ -90,6 +110,10 @@ def run_control_client(args: Any) -> int:
     json_output = getattr(args, "json", False)
     if json_output and not args.words:
         print("--json needs a command, e.g. cli ctl --json status", file=sys.stderr)
+        return 2
+    # checked here too: an older miner ignores the JSON flag and would run a change as text
+    if json_output and not json_command_allowed(args.words):
+        print(f"--json supports: {JSON_COMMANDS}", file=sys.stderr)
         return 2
     try:
         asyncio.run(probe())

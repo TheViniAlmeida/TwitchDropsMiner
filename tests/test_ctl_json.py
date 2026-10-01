@@ -12,7 +12,7 @@ from dataclasses import asdict
 
 from cli import CLIManager
 from cli_actions import CampaignFilters
-from cli_commands import CommandError
+from cli_commands import CommandError, json_command_allowed
 from control import MAX_REQUEST, ControlServer, send_command
 from tests.test_console_dispatcher import FakeTwitch
 
@@ -37,6 +37,15 @@ class CommandDataTests(unittest.TestCase):
                      "watch", "status extra", "drops", "", "unknown"):
             with self.subTest(line=line), self.assertRaises(CommandError):
                 self.manager.command_data(line)
+
+    def test_error_messages_are_redacted(self) -> None:
+        def missing(target: str) -> None:
+            raise CommandError(f"no campaign or game named {target}")
+
+        self.manager.actions.drops = missing
+        with self.assertRaises(CommandError) as raised:
+            self.manager.command_data("drops https://www.twitch.tv/activate?device-code=SECRET")
+        self.assertNotIn("SECRET", str(raised.exception))
 
     def test_strings_are_redacted_like_the_text_output(self) -> None:
         self.manager.actions.progress = lambda: {"name": "Enter this code: SECRET", "items": ["Enter this code: X"]}
@@ -125,6 +134,19 @@ class OlderMinerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("does not support --json", errors[-1])
 
 
+class JSONAllowListTests(unittest.TestCase):
+    def test_only_reads_are_allowed(self) -> None:
+        for words in (["status"], ["STATUS"], ["priority"], ["priority", "LIST"], ["exclude", "list"],
+                      ["filters"], ["get", "language"], ["campaigns", "--all"], ["drops", "Game"]):
+            with self.subTest(words=words):
+                self.assertTrue(json_command_allowed(words))
+        for words in ([], ["logout"], ["switch", "x"], ["set", "language", "English"], ["reload"],
+                      ["priority", "add", "Game"], ["exclude", "remove", "Game"], ["filters", "all=on"],
+                      ["watch"], ["quit"], ["help"]):
+            with self.subTest(words=words):
+                self.assertFalse(json_command_allowed(words))
+
+
 class CtlArgumentTests(unittest.TestCase):
     def test_json_without_command_exits_two(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -135,3 +157,15 @@ class CtlArgumentTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("--json needs a command", result.stderr)
+
+    def test_change_is_refused_before_contacting_the_miner(self) -> None:
+        # exit 2, not 3 (no miner): an older miner never gets the chance to run it as text
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "main.py", "cli", "ctl", "--json", "set", "language", "English"],
+                cwd=Path(__file__).resolve().parents[1], env={**os.environ, "TDM_DATA_DIR": directory},
+                capture_output=True, text=True, timeout=8, stdin=subprocess.DEVNULL,
+            )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--json supports", result.stderr)
+        self.assertEqual(result.stdout, "")

@@ -19,7 +19,7 @@ from typing import Any, TYPE_CHECKING, Callable, TypeVar
 from urllib.parse import unquote
 
 from cli_actions import Actions, ActionError, ActionRejected, CampaignFilters
-from cli_commands import CommandError
+from cli_commands import JSON_COMMANDS, CommandError, json_command_allowed
 from constants import OUTPUT_FORMATTER
 from exceptions import ExitRequest, LoginException
 from progress_timer import ProgressTimer
@@ -760,8 +760,9 @@ class CLIManager:
         """Structured result of a read-only command, for "cli ctl --json", redacted like the text."""
         try:
             return _redact_value(self._command_data(line))
-        except CommandError:
-            raise
+        except CommandError as exc:
+            # messages may echo the arguments: redact them like the text output
+            raise CommandError(_redact(str(exc))) from exc
         except Exception as exc:
             logger.exception("Console JSON command failed")
             raise CommandError("command failed") from exc
@@ -771,10 +772,10 @@ class CLIManager:
             parts = shlex.split(line)
         except ValueError as exc:
             raise CommandError(str(exc)) from exc
-        if not parts:
-            raise CommandError("expected a command")
+        if not json_command_allowed(parts):
+            raise CommandError(f"--json supports: {JSON_COMMANDS}")
         command, values = parts[0].casefold(), parts[1:]
-        if command in ("priority", "exclude") and values in ([], ["list"]):
+        if command in ("priority", "exclude"):
             return getattr(self.actions, command)("list")
         if command == "inventory" and values in ([], ["all"]):
             return self.actions.inventory(all=bool(values))
@@ -797,10 +798,7 @@ class CLIManager:
         }
         if command in simple and not values:
             return simple[command]()
-        raise CommandError(
-            "--json supports: status, channels, inventory [all], games [--names], campaigns, "
-            "drops <name>, game <name>, progress, settings, get [key], priority, exclude, filters"
-        )
+        raise CommandError(f"--json supports: {JSON_COMMANDS}")
 
     def _command_drops(self, values: list[str]) -> None:
         if not values:
