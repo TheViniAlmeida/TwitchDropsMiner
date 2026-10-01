@@ -197,6 +197,15 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
         self.manager.print("Websocket[0]: Adding topics: user-drop-events.123456789, onsite-notifications.123456789")
         self.assertNotIn("123456789", self.manager.log_tail(1)[0])
         self.assertIn("user-drop-events.<redacted>", self.manager.log_tail(1)[0])
+        self.assertNotIn("123456789", self.output.getvalue())
+
+    def test_id_filter_redacts_records_for_every_handler(self) -> None:
+        import logging
+        from cli import IdRedactingFilter
+        record = logging.LogRecord("TwitchDrops", logging.INFO, __file__, 1,
+                                   "Adding topics: %s", ("user-drop-events.987654321",), None)
+        self.assertTrue(IdRedactingFilter().filter(record))
+        self.assertEqual(record.getMessage(), "Adding topics: user-drop-events.<redacted>")
 
     async def test_encoded_device_code_url_is_masked_in_log_events(self) -> None:
         events = []

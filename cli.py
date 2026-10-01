@@ -46,11 +46,26 @@ _USER_ID = re.compile(r"(user ID: )\d+", re.IGNORECASE)
 _TOPIC_ID = re.compile(r"\b([a-z][a-z-]*[a-z])\.\d+\b")
 
 
+def redact_ids(text: str) -> str:
+    """Hide account and pubsub IDs; safe for every output, including the local terminal."""
+    return _TOPIC_ID.sub(r"\1.<redacted>", _USER_ID.sub(r"\1<redacted>", text))
+
+
+class IdRedactingFilter(logging.Filter):
+    """Redact IDs once, before any handler (terminal, file, dashboard) sees the record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = redact_ids(message)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        return True
+
+
 def _redact(line: str) -> str:
     if line.startswith("Enter this code: "):
         return "Enter this code: <redacted>"
-    line = _DEVICE_CODE_QUERY.sub(_redact_device_code_query, line)
-    return _TOPIC_ID.sub(r"\1.<redacted>", _USER_ID.sub(r"\1<redacted>", line))
+    return redact_ids(_DEVICE_CODE_QUERY.sub(_redact_device_code_query, line))
 
 
 def _redact_device_code_query(match: re.Match[str]) -> str:
@@ -291,6 +306,7 @@ class CLIManager:
         self._watch_task: asyncio.Task[None] | None = None
         self._remote_watches: dict[Callable[[str], None], asyncio.Task[None]] = {}
         self._handler.setFormatter(OUTPUT_FORMATTER)
+        self._handler.addFilter(IdRedactingFilter())
         logger.addHandler(self._handler)
         if (logging_level := logger.getEffectiveLevel()) < logging.ERROR:
             self.print(f"Logging level: {logging.getLevelName(logging_level)}")
@@ -414,7 +430,8 @@ class CLIManager:
                 # remote output is a command reply: no timestamp
                 writer(_redact(line))
                 continue
-            sys.stdout.write(f"{output}\n")
+            # the local terminal keeps the device code (the owner types it) but never the IDs
+            sys.stdout.write(f"{redact_ids(output)}\n")
             recorded = f"{stamp}: {_redact(line)}"
             self._logs.append(recorded)
             self._notify("log", recorded)
