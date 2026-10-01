@@ -125,7 +125,10 @@ if __name__ == "__main__":
         run_parser.add_argument("--open-browser", action="store_true")
         run_parser.add_argument("--dashboard", action="store_true")
         run_parser.add_argument("--dashboard-host")
-        run_parser.add_argument("--dashboard-port")
+        run_parser.add_argument("--dashboard-port", metavar="N|A-B",
+                                help="exact port or first free port in range (default: 23450-23500)")
+        run_parser.add_argument("--dashboard-token-file", nargs="?", const="", metavar="PATH",
+                                help="enable token authentication (default file: DATA_DIR/dashboard.token)")
         run_parser.add_argument("--dashboard-readonly", action="store_true")
         settings_parser = cli_subparsers.add_parser("settings")
         settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)

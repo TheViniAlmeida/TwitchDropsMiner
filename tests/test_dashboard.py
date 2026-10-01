@@ -46,8 +46,9 @@ class ConfigTests(unittest.TestCase):
         args = argparse.Namespace(dashboard=False, dashboard_host=None, dashboard_port=None,
                                   dashboard_readonly=False)
         config = resolve_dashboard_config(args, {})
-        self.assertEqual((config.enabled, config.host, config.port, config.readonly, config.token),
-                         (False, "127.0.0.1", 8787, False, None))
+        self.assertEqual((config.enabled, config.host, config.port, config.port_range,
+                          config.readonly, config.token),
+                         (False, "127.0.0.1", 23450, (23450, 23500), False, None))
         with tempfile.TemporaryDirectory() as directory, patch("dashboard.DATA_DIR", Path(directory)):
             args.dashboard = True
             args.dashboard_host = "127.0.0.1"
@@ -75,9 +76,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("invalid dashboard port", result.stderr)
 
-    def test_exposed_config_creates_private_token_and_prints_path_only(self) -> None:
+    def test_explicit_file_creates_private_token_and_prints_path_only(self) -> None:
         args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_port=0,
-                                  dashboard_readonly=False)
+                                  dashboard_readonly=False, dashboard_token_file="")
         with tempfile.TemporaryDirectory() as directory, patch("dashboard.DATA_DIR", Path(directory)):
             output = io.StringIO()
             with redirect_stdout(output):

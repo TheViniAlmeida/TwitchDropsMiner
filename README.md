@@ -60,20 +60,24 @@ run this fork from source on Windows when using CLI mode.
 #### Dashboard (CLI mode)
 
 Enable the optional browser panel with `main.py cli run --dashboard`. It listens on
-`127.0.0.1:8787` by default; open the URL printed at startup.
+`127.0.0.1` on the first free port from `23450` to `23500` by default; open the URL printed at startup.
 
 | Flag | Environment variable | Default |
 | --- | --- | --- |
 | `--dashboard` | `TDM_DASHBOARD=1` | Off |
 | `--dashboard-host HOST` | `TDM_DASHBOARD_HOST` | `127.0.0.1` |
-| `--dashboard-port PORT` | `TDM_DASHBOARD_PORT` | `8787` |
+| `--dashboard-port N\|A-B` | `TDM_DASHBOARD_PORT` | First free in `23450-23500` |
 | `--dashboard-readonly` | `TDM_DASHBOARD_READONLY=1` | Off |
-| — | `TDM_DASHBOARD_TOKEN` | Optional on loopback; required elsewhere |
+| `--dashboard-token-file [PATH]` | `TDM_DASHBOARD_TOKEN_FILE` | Off (default path when enabled: `TDM_DATA_DIR/dashboard.token`) |
+| — | `TDM_DASHBOARD_TOKEN` | Off |
 | — | `TDM_DASHBOARD_ORIGINS` | No additional origins |
 
-Outside loopback, the miner generates a token when `TDM_DASHBOARD_TOKEN` is unset and stores it
-in `TDM_DATA_DIR/dashboard.token` with restricted permissions. Startup prints only the token
-file path, never the token. The browser keeps a supplied token in session storage. Read-only
+Authentication is off by default, even outside loopback. A non-loopback bind without a token
+warns that anyone on the network can control the miner. Set `TDM_DASHBOARD_TOKEN` or enable
+`--dashboard-token-file [PATH]` to require a token; the latter creates or reads a restricted
+`0600` file. The env token takes precedence over the file. Startup prints only the token
+file path, never the token. `GET /api/meta` exposes the auth and readonly settings without
+authentication. The browser keeps a supplied token in session storage. Read-only
 mode hides controls and rejects changes. Host and Origin checks protect the API; set
 `TDM_DASHBOARD_ORIGINS` to comma-separated exact origins when a reverse proxy rewrites Host.
 The panel reads game filters from `GET /api/priority` and `GET /api/exclude`; changes use the
@@ -82,7 +86,7 @@ Authentication failures are limited per client IP, so clients behind one reverse
 the limit for invalid tokens while valid tokens remain usable. Use TLS at the proxy for remote access.
 
 For nginx, set `TDM_DASHBOARD_ORIGINS=https://your.host` and use
-`location / { proxy_pass http://127.0.0.1:8787; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; }`.
+`location / { proxy_pass http://127.0.0.1:23450; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; }`.
 
 ### Pictures:
 
