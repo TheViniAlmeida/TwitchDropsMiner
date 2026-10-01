@@ -7,6 +7,7 @@ const filterNames = ['not_linked', 'upcoming', 'expired', 'excluded', 'finished'
 // same initial state as the GUI inventory filters
 const filterState = Object.fromEntries(filterNames.map((name) => [name, name === 'upcoming']));
 const cache = new Map();
+let filtersChosen = false;
 let auth = false;
 let token = '';
 let readonly = false;
@@ -208,6 +209,10 @@ function connect() {
     if (data.type === 'state') {
       const { type, ...nextState } = data;
       state = nextState;
+      if (!filtersChosen && state.default_filters) {
+        // same initial filters as the GUI until the viewer picks their own
+        for (const name of filterNames) if (typeof state.default_filters[name] === 'boolean') filterState[name] = state.default_filters[name];
+      }
       readonly = Boolean(state.readonly);
       $('miner-state').textContent = state.state || 'Unknown';
       $('readonly-badge').hidden = !readonly;
@@ -398,6 +403,7 @@ async function inventory() {
     input.checked = Boolean(filterState[name]);
     input.addEventListener('change', () => {
       filterState[name] = input.checked;
+      filtersChosen = true;
       persist(localStorage, 'dashboardFilters', JSON.stringify(filterState));
       run(() => renderPage());
     });
@@ -634,6 +640,7 @@ async function start() {
   try {
     const selected = JSON.parse(savedFilters);
     for (const name of [...filterNames, 'all']) if (typeof selected?.[name] === 'boolean') filterState[name] = selected[name];
+    if (selected && typeof selected === 'object') filtersChosen = true;
   } catch {}
   $('theme-toggle').addEventListener('click', () => {
     const current = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');

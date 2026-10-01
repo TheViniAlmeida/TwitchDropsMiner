@@ -166,6 +166,11 @@ class RichActionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.actions.game("Alpha")["status"], "not_linked")
         self.settings.exclude.add("Alpha")
         self.assertEqual(self.actions.game("Alpha")["status"], "excluded")
+        self.assertFalse(self.actions.default_filters().not_linked)
+        self.settings.priority_mode = PriorityMode.PRIORITY_ONLY
+        self.assertTrue(self.actions.default_filters().not_linked)
+        self.assertTrue(self.actions._filters({"expired": True}).not_linked)
+        self.settings.priority_mode = PriorityMode.ENDING_SOONEST
         self.settings.priority = ["Alpha"]
         self.assertEqual(self.actions.game("Alpha")["status"], "not_linked")
         self.settings.priority = []

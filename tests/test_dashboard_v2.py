@@ -139,6 +139,10 @@ class FakeActions:
     def state(self):
         return {"state": "idle"}
 
+    def default_filters(self):
+        from cli_actions import CampaignFilters
+        return CampaignFilters(not_linked=True)
+
     def progress(self):
         self.samples += 1
         return {"id": "drop-1", "campaign": "Campaign", "progress": .5,
@@ -194,6 +198,9 @@ class RoutesV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads((await self.call("/api/meta")).text),
                          {"auth": False, "readonly": False, "version": __version__})
         self.assertEqual(json.loads((await self.call("/api/state")).text)["auth"], False)
+        self.assertEqual(json.loads((await self.call("/api/state")).text)["default_filters"],
+                         {"not_linked": True, "upcoming": True, "expired": False,
+                          "excluded": False, "finished": False})
         self.assertEqual(json.loads((await self.call("/api/games")).text)[0]["status"], "available")
         self.assertEqual(json.loads((await self.call("/api/drops?target=A")).text),
                          [{"target": "A"}])

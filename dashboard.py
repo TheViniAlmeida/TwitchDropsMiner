@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import errno
 import hmac
 import ipaddress
@@ -560,8 +560,10 @@ class Dashboard:
         return web.json_response(self._sanitize(result))
 
     def _state(self) -> dict[str, Any]:
-        return {**self.manager.actions.state(), "auth": self.config.token is not None,
-                "readonly": self.config.readonly}
+        actions = self.manager.actions
+        return {**actions.state(), "auth": self.config.token is not None,
+                "readonly": self.config.readonly,
+                "default_filters": asdict(actions.default_filters())}
 
     def _sanitize(self, value: Any) -> Any:
         if isinstance(value, str):

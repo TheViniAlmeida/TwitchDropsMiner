@@ -286,7 +286,8 @@ class CLIManager:
         self._stdin_fd: int | None = None
         self._stdin_blocking: bool | None = None
         self._logout_confirmation = False
-        self._campaign_filters = CampaignFilters()
+        # resolved on first use: the default depends on the priority mode
+        self._campaign_filters: CampaignFilters | None = None
         self._watch_task: asyncio.Task[None] | None = None
         self._remote_watches: dict[Callable[[str], None], asyncio.Task[None]] = {}
         self._handler.setFormatter(OUTPUT_FORMATTER)
@@ -686,6 +687,9 @@ class CLIManager:
             changes[key] = value.casefold() == "on"
         return changes
 
+    def _current_filters(self) -> CampaignFilters:
+        return self._campaign_filters if self._campaign_filters is not None else self.actions.default_filters()
+
     def _command_campaigns(self, values: list[str]) -> None:
         include_all = False
         changes: list[str] = []
@@ -705,7 +709,7 @@ class CLIManager:
                 # multi-word game names work without quoting, like "game" and "drops"
                 words.append(value)
         game = " ".join(words) or None
-        selected = replace(self._campaign_filters, **self._filter_changes(changes))
+        selected = replace(self._current_filters(), **self._filter_changes(changes))
         self.print("game | campaign | status | linked | progress | claimed/total | ends at | link")
         for campaign in self.actions.campaigns(selected, game=game, include_all=include_all):
             self.print(
@@ -790,7 +794,7 @@ class CLIManager:
             task.cancel()
 
     def _command_filters(self, values: list[str]) -> None:
-        self._campaign_filters = replace(self._campaign_filters, **self._filter_changes(values))
+        self._campaign_filters = replace(self._current_filters(), **self._filter_changes(values))
         for field in fields(CampaignFilters):
             self.print(f"{field.name} = {'on' if getattr(self._campaign_filters, field.name) else 'off'}")
 
