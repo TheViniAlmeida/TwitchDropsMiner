@@ -50,6 +50,13 @@ class RedactionTests(unittest.TestCase):
         self.assertIsNot(redacted, kwargs)
         self.assertIsNot(redacted["headers"], kwargs["headers"])
 
+    def test_masked_proxy_cannot_be_saved_back(self) -> None:
+        from cli_commands import CommandError, set_setting
+        settings = SimpleNamespace(proxy=URL("http://alice:sample@localhost:8080"))
+        with self.assertRaises(CommandError):
+            set_setting(settings, "proxy", "http://alice:***@localhost:8080")
+        self.assertEqual(settings.proxy.password, "sample")
+
     def test_setting_value_masks_proxy_password(self) -> None:
         proxy = URL("http://alice:sample@localhost:8080")
         settings = SimpleNamespace(proxy=proxy)

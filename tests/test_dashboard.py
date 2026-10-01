@@ -608,6 +608,31 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             await pending.send_json({"auth": "private-token"})
             self.assertEqual((await pending.receive_json())["type"], "state")
 
+    async def test_limited_address_guesses_are_serialized(self) -> None:
+        from unittest.mock import patch
+        await self.dashboard.stop()
+        self.dashboard = Dashboard(self.manager, self.twitch,
+                                   DashboardConfig(port=0, token="private-token", enabled=True,
+                                                   auth_timeout=0.5))
+        await self.dashboard.start()
+        self.base = f"http://127.0.0.1:{self.dashboard.port}"
+        for _ in range(5):
+            async with self.session.get(self.base + "/api/state") as response:
+                self.assertEqual(response.status, 401)
+        with patch("dashboard._WS_LIMITED_FAILURE_DELAY", 0.5):
+            async with self.session.ws_connect(self.base + "/api/ws") as guess:
+                await guess.send_json({"auth": "wrong-token"})
+                await asyncio.sleep(0.1)
+                # the failed guess still holds the only pending slot of this address
+                with self.assertRaises(WSServerHandshakeError) as refused:
+                    await self.session.ws_connect(self.base + "/api/ws")
+                self.assertEqual(refused.exception.status, 429)
+                await guess.receive()
+                self.assertEqual(guess.close_code, WSCloseCode.POLICY_VIOLATION)
+            async with self.session.ws_connect(self.base + "/api/ws") as valid:
+                await valid.send_json({"auth": "private-token"})
+                self.assertEqual((await valid.receive_json())["type"], "state")
+
     async def test_websocket_rejects_oversized_frames(self) -> None:
         for token in (None, "private-token"):
             await self.dashboard.stop()

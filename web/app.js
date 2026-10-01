@@ -533,7 +533,11 @@ async function settingsPage() {
     field.append(el('span', { text: key.replaceAll('_', ' ') }), input);
     entry.append(field);
     if (!readonly) {
-      const save = () => update('settings', '/api/settings', { key, value: definition.type === 'boolean' ? String(input.checked) : input.value });
+      const save = () => {
+        // the proxy is shown masked: saving it untouched would store "***" as the password
+        if (key === 'proxy' && input.value === String(definition.value ?? '') && input.value.includes('***')) return Promise.resolve();
+        return update('settings', '/api/settings', { key, value: definition.type === 'boolean' ? String(input.checked) : input.value });
+      };
       if (definition.type === 'boolean' || definition.choices) input.addEventListener('change', () => run(save));
       else entry.append(button('Save', save, 'primary'));
     }

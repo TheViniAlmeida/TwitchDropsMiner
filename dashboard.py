@@ -34,6 +34,7 @@ from version import __version__
 
 logger = logging.getLogger("TwitchDrops.dashboard")
 _WS_MAX_MESSAGE = 4096
+_WS_LIMITED_FAILURE_DELAY = 2.0
 _CSP = "default-src 'self'; img-src 'self' https://static-cdn.jtvnw.net; connect-src 'self'"
 _ORIGIN = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?\Z")
 
@@ -617,20 +618,25 @@ class Dashboard:
             if self.config.token is not None:
                 self._pending_auth[remote] = self._pending_auth.get(remote, 0) + 1
                 try:
-                    message = await ws.receive(timeout=self.config.auth_timeout)
-                    data = json.loads(message.data) if message.type == WSMsgType.TEXT else None
-                except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
-                    data = None
+                    try:
+                        message = await ws.receive(timeout=self.config.auth_timeout)
+                        data = json.loads(message.data) if message.type == WSMsgType.TEXT else None
+                    except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
+                        data = None
+                    if not isinstance(data, dict) or not isinstance(data.get("auth"), str) or not self._matches(data["auth"]):
+                        if self._limited(remote):
+                            # keep the single pending slot busy: a limited address can only guess
+                            # once per delay, while a valid token still gets in at once
+                            await asyncio.sleep(_WS_LIMITED_FAILURE_DELAY)
+                        else:
+                            self._failed(remote)
+                        await ws.close(code=WSCloseCode.POLICY_VIOLATION)
+                        return ws
                 finally:
                     if self._pending_auth[remote] <= 1:
                         del self._pending_auth[remote]
                     else:
                         self._pending_auth[remote] -= 1
-                if not isinstance(data, dict) or not isinstance(data.get("auth"), str) or not self._matches(data["auth"]):
-                    if not self._limited(remote):
-                        self._failed(remote)
-                    await ws.close(code=WSCloseCode.POLICY_VIOLATION)
-                    return ws
             await ws.send_json({"type": "state", **self._sanitize(self._state())})
             pending_logs: deque[str] = deque(maxlen=100)
             changed = False
