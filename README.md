@@ -80,8 +80,13 @@ file path, never the token. `GET /api/meta` exposes the auth and readonly settin
 authentication. The browser keeps a supplied token in session storage. Read-only
 mode hides controls and rejects changes. Host and Origin checks protect the API; set
 `TDM_DASHBOARD_ORIGINS` to comma-separated exact origins when a reverse proxy rewrites Host.
-The panel reads game filters from `GET /api/priority` and `GET /api/exclude`; changes use the
-matching `POST` routes.
+The panel offers Overview (live drop, KPIs and charts), Inventory (campaigns grouped by game,
+filter toggles and expandable drops), Games (priority, exclusions and channel selection),
+Channels (watch controls), Settings and Logs. Search filters the current page. Inventory filters
+and the light/dark theme persist in browser local storage. The layout adapts to a bottom tab bar
+on mobile. Priority and exclusion controls use the matching `GET` and `POST` routes.
+From another terminal, `main.py cli ctl state` queries the running miner through its local
+control channel; `main.py cli ctl help` lists the available remote console commands.
 Authentication failures are limited per client IP, so clients behind one reverse proxy share
 the limit for invalid tokens while valid tokens remain usable. Use TLS at the proxy for remote access.
 
