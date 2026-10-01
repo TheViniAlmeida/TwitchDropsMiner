@@ -28,6 +28,7 @@ from cli_actions import ActionError, ActionRejected
 from cli_commands import CommandError
 from constants import DATA_DIR
 from utils import resource_path
+from private_file import restrict_to_owner
 from version import __version__
 
 
@@ -201,12 +202,21 @@ def resolve_dashboard_config(args: argparse.Namespace, environ: Mapping[str, str
             except FileExistsError:
                 pass
             else:
+                try:
+                    # before the token exists: Windows ignores the 0o600 above
+                    restrict_to_owner(token_file)
+                except OSError:
+                    os.close(descriptor)
+                    token_file.unlink(missing_ok=True)
+                    raise
                 token = secrets.token_urlsafe(32)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                     output.write(token + "\n")
             if token is None:
                 if token_file.is_symlink():
                     raise DashboardError(f"Dashboard token path is not a regular file: {token_file}")
+                # an existing file may carry a looser ACL: tighten it before reading the token
+                restrict_to_owner(token_file)
                 descriptor = os.open(token_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
                 with os.fdopen(descriptor, "r", encoding="utf-8") as source:
                     info = os.fstat(source.fileno())

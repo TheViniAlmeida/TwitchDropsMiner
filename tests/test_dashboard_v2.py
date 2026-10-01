@@ -72,6 +72,21 @@ class ConfigV2Tests(unittest.TestCase):
                 resolve_dashboard_config(args, {
                     "TDM_DASHBOARD_TOKEN_FILE": str(config.token_file)})
 
+    def test_token_file_acl_is_restricted_and_failure_leaves_no_token(self):
+        args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_token_file="")
+        with tempfile.TemporaryDirectory() as directory, patch("dashboard.DATA_DIR", Path(directory)):
+            token_file = Path(directory) / "dashboard.token"
+            with patch("dashboard.restrict_to_owner", side_effect=OSError(5, "icacls failed")):
+                with self.assertRaises(DashboardError):
+                    resolve_dashboard_config(args, {})
+            self.assertFalse(token_file.exists())
+            with patch("dashboard.restrict_to_owner") as restrict:
+                config = resolve_dashboard_config(args, {})
+                self.assertEqual(restrict.call_args.args[0], token_file)
+                self.assertEqual(resolve_dashboard_config(args, {}).token, config.token)
+                # existing files are tightened again before the token is read
+                self.assertEqual(restrict.call_count, 2)
+
     def test_empty_env_token_is_an_error(self):
         args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_port=None)
         with self.assertRaises(argparse.ArgumentError):

@@ -316,18 +316,27 @@ runpy.run_path("main.py", run_name="__main__")
 
 
 class WindowsAclTests(unittest.TestCase):
-    def test_icacls_restricts_to_current_user_and_fails_closed(self) -> None:
-        import control
+    def test_acl_goes_to_the_process_sid_and_fails_closed(self) -> None:
         from unittest.mock import patch
-        with patch.dict(os.environ, {"USERNAME": "alice", "USERDOMAIN": "HOME"}), \
-                patch("control.subprocess.run") as run:
-            run.return_value.returncode = 0
-            control._restrict_windows_acl(Path("control.json"))
-            self.assertEqual(run.call_args.args[0],
-                             ["icacls", "control.json", "/inheritance:r", "/grant:r", "HOME\\alice:F"])
-            run.return_value.returncode = 5
+        import private_file
+
+        def fake_run(command, **kwargs):
+            if command[0] == "whoami":
+                return SimpleNamespace(returncode=0, stdout='"home\\alice","S-1-5-21-1-2-3-1001"\n')
+            return SimpleNamespace(returncode=0, stdout="")
+
+        with patch.object(private_file, "WINDOWS", True), \
+                patch("private_file.subprocess.run", side_effect=fake_run) as run:
+            private_file.restrict_to_owner(Path("secret.json"))
+            self.assertEqual(run.call_args_list[1].args[0], ["icacls", "secret.json", "/reset"])
+            self.assertEqual(run.call_args_list[2].args[0],
+                             ["icacls", "secret.json", "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:F"])
+            run.side_effect = lambda command, **kwargs: SimpleNamespace(returncode=5, stdout="")
             with self.assertRaises(OSError):
-                control._restrict_windows_acl(Path("control.json"))
+                private_file.restrict_to_owner(Path("secret.json"))
+        with patch("private_file.subprocess.run") as run:
+            private_file.restrict_to_owner(Path("secret.json"))
+            run.assert_not_called()
 
 
 class WindowsAclStartTests(unittest.IsolatedAsyncioTestCase):
