@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from aiohttp import ClientSession, WSCloseCode, web
+from aiohttp import ClientSession, WSCloseCode, WSServerHandshakeError, web
 from aiohttp.test_utils import make_mocked_request
 
 from cli_actions import Actions, ActionRejected
@@ -46,8 +46,9 @@ class ConfigTests(unittest.TestCase):
         args = argparse.Namespace(dashboard=False, dashboard_host=None, dashboard_port=None,
                                   dashboard_readonly=False)
         config = resolve_dashboard_config(args, {})
-        self.assertEqual((config.enabled, config.host, config.port, config.readonly, config.token),
-                         (False, "127.0.0.1", 8787, False, None))
+        self.assertEqual((config.enabled, config.host, config.port, config.port_range,
+                          config.readonly, config.token),
+                         (False, "127.0.0.1", 23450, (23450, 23500), False, None))
         with tempfile.TemporaryDirectory() as directory, patch("dashboard.DATA_DIR", Path(directory)):
             args.dashboard = True
             args.dashboard_host = "127.0.0.1"
@@ -75,9 +76,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("invalid dashboard port", result.stderr)
 
-    def test_exposed_config_creates_private_token_and_prints_path_only(self) -> None:
+    def test_explicit_file_creates_private_token_and_prints_path_only(self) -> None:
         args = argparse.Namespace(dashboard=True, dashboard_host="0.0.0.0", dashboard_port=0,
-                                  dashboard_readonly=False)
+                                  dashboard_readonly=False, dashboard_token_file="")
         with tempfile.TemporaryDirectory() as directory, patch("dashboard.DATA_DIR", Path(directory)):
             output = io.StringIO()
             with redirect_stdout(output):
@@ -105,7 +106,7 @@ async def fake_run(self):
     self.gui.close()
 dashboard.Dashboard.start = forbidden_start
 twitch.Twitch.run = fake_run
-sys.argv = ["main.py", "cli", "run"]
+sys.argv = ["main.py", "cli", "run", "--no-control"]
 runpy.run_path("main.py", run_name="__main__")
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -128,7 +129,7 @@ async def forbidden_run(self):
     raise AssertionError("miner started after dashboard bind failed")
 dashboard.Dashboard.start = failed_start
 twitch.Twitch.run = forbidden_run
-sys.argv = ["main.py", "cli", "run", "--dashboard", "--dashboard-port", "0"]
+sys.argv = ["main.py", "cli", "run", "--no-control", "--dashboard", "--dashboard-port", "0"]
 runpy.run_path("main.py", run_name="__main__")
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -172,7 +173,7 @@ dashboard.Dashboard.stop = fake_stop
 twitch.Twitch.run = fake_run
 twitch.Twitch.shutdown = tracked_shutdown
 mode = sys.argv[-1]
-sys.argv = ["main.py", "cli", "run", "--dashboard"]
+sys.argv = ["main.py", "cli", "run", "--no-control", "--dashboard"]
 runpy.run_path("main.py", run_name="__main__")
 """
         for mode in ("raise", "slow"):
@@ -599,6 +600,13 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             await ws.receive()
             self.assertEqual(ws.close_code, WSCloseCode.POLICY_VIOLATION)
         self.assertEqual(len(next(iter(self.dashboard._failures.values()))), 5)
+        # a limited address keeps a single pending handshake; extra upgrades are refused early
+        async with self.session.ws_connect(self.base + "/api/ws") as pending:
+            with self.assertRaises(WSServerHandshakeError) as refused:
+                await self.session.ws_connect(self.base + "/api/ws")
+            self.assertEqual(refused.exception.status, 429)
+            await pending.send_json({"auth": "private-token"})
+            self.assertEqual((await pending.receive_json())["type"], "state")
 
     async def test_state_is_delivered_during_continuous_logs(self) -> None:
         async with self.session.ws_connect(self.base + "/api/ws") as ws:
