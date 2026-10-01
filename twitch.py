@@ -88,7 +88,10 @@ def _redacted_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
         elif name == "proxy" and value:
             proxy = URL(value)
             if proxy.password is not None:
-                redacted[name] = str(proxy.with_password("***"))
+                proxy = proxy.with_password("***")
+            # a proxy query may carry a credential too
+            masked = str(proxy.with_query(None).with_fragment(None))
+            redacted[name] = f"{masked}?***" if proxy.query_string or proxy.fragment else masked
         elif name in ("auth", "proxy_auth") and value is not None:
             redacted[name] = "<redacted>"
         elif name == "cookies":
@@ -1272,7 +1275,7 @@ class Twitch:
             "Twitch credits only one stream at a time, so this miner's progress is paused. "
             "Stop other miners or players using this account."
         )
-        logger.warning(message)
+        # one publication path: in CLI mode a logged warning would reach the console twice
         self.print(message)
 
     @task_wrapper

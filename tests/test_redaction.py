@@ -35,6 +35,10 @@ class RedactionTests(unittest.TestCase):
         self.assertTrue(all(value == "<redacted>" for value in redacted["json"].values()))
         self.assertTrue(all(value == "<redacted>" for value in redacted["params"].values()))
         self.assertEqual(redacted["proxy"], "http://alice:***@localhost:8080")
+        self.assertEqual(_redacted_request_kwargs({"proxy": URL("http://proxy:8080/?token=sample")})["proxy"],
+                         "http://proxy:8080/?***")
+        self.assertEqual(_redacted_request_kwargs({"proxy": URL("http://proxy:8080")})["proxy"],
+                         "http://proxy:8080")
         self.assertEqual(redacted["auth"], "<redacted>")
         self.assertEqual(redacted["proxy_auth"], "<redacted>")
         redacted_repr = repr(redacted)
