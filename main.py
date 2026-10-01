@@ -25,7 +25,7 @@ if __name__ == "__main__":
     from twitch import Twitch
     from settings import Settings
     from version import __version__
-    from exceptions import CaptchaRequired
+    from exceptions import CaptchaRequired, LoginException
     from utils import lock_file, resource_path, set_root_icon
     from constants import LOGGING_LEVELS, SELF_PATH, FILE_FORMATTER, LOG_PATH, LOCK_PATH
 
@@ -278,11 +278,14 @@ if __name__ == "__main__":
             exit_status = 1
             client.prevent_close()
             client.print(_("error", "captcha"))
-        except Exception:
+        except Exception as exc:
             exit_status = 1
             client.prevent_close()
-            client.print("Fatal error encountered:\n")
-            client.print(traceback.format_exc())
+            if cli_mode and isinstance(exc, LoginException):
+                client.print(str(exc))
+            else:
+                client.print("Fatal error encountered:\n")
+                client.print(traceback.format_exc())
         finally:
             if sys.platform == "linux" or (cli_mode and sys.platform != "win32"):
                 loop.remove_signal_handler(signal.SIGINT)

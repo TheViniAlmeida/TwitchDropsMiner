@@ -150,6 +150,11 @@ class _AuthState:
     async def _oauth_login(self) -> str:
         login_form: LoginForm = self._twitch.gui.login
         client_info: ClientInfo = self._twitch._client_type
+        client_name = next(
+            (name for name in ("WEB", "MOBILE_WEB", "ANDROID_APP", "SMARTBOX")
+             if getattr(ClientType, name) is client_info),
+            "unknown",
+        )
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
@@ -180,7 +185,32 @@ class _AuthState:
                     #     "user_code": "8 chars [A-Z]",
                     #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
                     # }
-                    response_json: JsonType = await response.json()
+                    try:
+                        response_json: JsonType = await response.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        response_json = None
+                    if response.status != 200:
+                        reason = "invalid client" if (
+                            isinstance(response_json, dict)
+                            and response_json.get("message") == "invalid client"
+                        ) else "request rejected"
+                        raise LoginException(
+                            f"Twitch rejected the device login for client {client_name}: "
+                            f"{response.status} {reason}"
+                        )
+                    if not isinstance(response_json, dict) or not response_json.get("device_code"):
+                        reason = "missing device_code" if isinstance(response_json, dict) else "invalid JSON response"
+                        raise LoginException(
+                            f"Twitch rejected the device login for client {client_name}: "
+                            f"{response.status} {reason}"
+                        )
+                    if not all(response_json.get(key) for key in (
+                        "user_code", "interval", "verification_uri", "expires_in"
+                    )):
+                        raise LoginException(
+                            f"Twitch rejected the device login for client {client_name}: "
+                            f"{response.status} incomplete device response"
+                        )
                     device_code: str = response_json["device_code"]
                     user_code: str = response_json["user_code"]
                     interval: int = response_json["interval"]
@@ -208,13 +238,22 @@ class _AuthState:
                         # 200 means success, 400 means the user haven't entered the code yet
                         if response.status != 200:
                             continue
-                        response_json = await response.json()
+                        try:
+                            response_json = await response.json()
+                        except (aiohttp.ContentTypeError, ValueError):
+                            response_json = None
                         # {
                         #     "access_token": "40 chars [A-Za-z0-9]",
                         #     "refresh_token": "40 chars [A-Za-z0-9]",
                         #     "scope": [...],
                         #     "token_type": "bearer"
                         # }
+                        if not isinstance(response_json, dict) or not isinstance(
+                            response_json.get("access_token"), str
+                        ) or not response_json["access_token"]:
+                            raise LoginException(
+                                f"Twitch returned an invalid token response for client {client_name}"
+                            )
                         self.access_token = cast(str, response_json["access_token"])
                         return self.access_token
             except RequestInvalid:
