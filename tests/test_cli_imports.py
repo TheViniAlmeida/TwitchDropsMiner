@@ -74,6 +74,10 @@ import runpy
 import sys
 from contextlib import asynccontextmanager
 
+# Block GUI modules before anything imports the app code.
+for module in ("tkinter", "tkinter.messagebox", "pystray", "PIL", "PIL.Image", "PIL.ImageTk"):
+    sys.modules[module] = None
+
 import twitch
 from exceptions import ExitRequest
 
@@ -98,8 +102,6 @@ async def local_request(self, method, url, **kwargs):
 twitch.Twitch.__init__ = local_init
 twitch.Twitch.request = local_request
 
-for module in ("tkinter", "tkinter.messagebox", "pystray", "PIL", "PIL.Image", "PIL.ImageTk"):
-    sys.modules[module] = None
 sys.argv = ["main.py", "-vv", "cli", "run"]
 runpy.run_path("main.py", run_name="__main__")
 """
