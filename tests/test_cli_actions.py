@@ -183,10 +183,25 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_activation_code_is_not_kept_in_log_buffer(self) -> None:
         with patch("sys.stdout", self.output):
-            await self.manager.login.ask_enter_code(URL("https://www.twitch.tv/activate"), "CODE-123")
+            await self.manager.login.ask_enter_code(
+                URL("https://www.twitch.tv/activate?device-code=CODE-123", encoded=True),
+                "CODE-123",
+            )
         self.assertIn("CODE-123", self.output.getvalue())
         self.assertNotIn("CODE-123", "\n".join(self.manager.log_tail()))
+        self.assertIn("device-code=<redacted>", "\n".join(self.manager.log_tail()))
         self.assertTrue(self.manager.log_tail(1)[0].endswith("Enter this code: <redacted>"))
+
+    async def test_encoded_device_code_url_is_masked_in_log_events(self) -> None:
+        events = []
+        self.manager.subscribe(lambda event, line: events.append(line) if event == "log" else None)
+        url = "Open this activation URL: https://www.twitch.tv/activate?DEVICE%2DCode=CODE%2D123&mode=login"
+        with patch("sys.stdout", self.output):
+            self.manager.print(url)
+        self.assertIn("CODE%2D123", self.output.getvalue())
+        for line in (self.manager.log_tail(1)[0], events[-1]):
+            self.assertNotIn("CODE%2D123", line)
+            self.assertIn("DEVICE%2DCode=<redacted>&mode=login", line)
 
 
 class ManagerEventsTests(unittest.TestCase):

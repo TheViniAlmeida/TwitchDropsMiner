@@ -260,16 +260,20 @@ if __name__ == "__main__":
                 lambda *_: loop.call_soon_threadsafe(client.gui.close),
             )
         dashboard = None
-        try:
-            if cli_mode and dashboard_config.enabled:
-                dashboard = Dashboard(client.gui, client, dashboard_config)
+        dashboard_start_failed = False
+        if cli_mode and dashboard_config.enabled:
+            dashboard = Dashboard(client.gui, client, dashboard_config)
+            try:
                 await dashboard.start()
-            await client.run()
+            except DashboardError as exc:
+                dashboard_start_failed = True
+                exit_status = 1
+                client.print(str(exc))
+        try:
+            if not dashboard_start_failed:
+                await client.run()
             if cli_mode and not client.gui.close_requested:
                 exit_status = 1
-        except DashboardError as exc:
-            exit_status = 1
-            client.print(str(exc))
         except CaptchaRequired:
             exit_status = 1
             client.prevent_close()
@@ -290,7 +294,16 @@ if __name__ == "__main__":
                 try:
                     async def shutdown_cli():
                         if dashboard is not None:
-                            await dashboard.stop()
+                            stop_task = asyncio.create_task(dashboard.stop())
+                            done, pending = await asyncio.wait({stop_task}, timeout=2)
+                            if pending:
+                                stop_task.cancel()
+                                logger.warning("Dashboard shutdown timed out")
+                            else:
+                                try:
+                                    stop_task.result()
+                                except Exception:
+                                    logger.exception("Dashboard shutdown failed")
                         await client.shutdown()
 
                     await asyncio.wait_for(shutdown_cli(), timeout=10)

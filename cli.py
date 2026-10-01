@@ -14,6 +14,7 @@ from contextlib import suppress
 from datetime import datetime
 from time import monotonic
 from typing import Any, TYPE_CHECKING, Callable, TypeVar
+from urllib.parse import unquote
 
 from cli_actions import Actions, ActionError, ActionRejected
 from cli_commands import CommandError
@@ -34,6 +35,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger("TwitchDrops")
 _T = TypeVar("_T")
 _COUNTER_STATUS = re.compile(r"\((\d+)/(\d+)\)\s*$")
+_DEVICE_CODE_QUERY = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
+
+
+def _redact_device_code_query(match: re.Match[str]) -> str:
+    if unquote(match.group(2)).casefold() == "device-code":
+        return f"{match.group(1)}{match.group(2)}=<redacted>"
+    return match.group(0)
 
 
 class _CLIOutputHandler(logging.Handler):
@@ -385,7 +393,8 @@ class CLIManager:
             sys.stdout.write(f"{output}\n")
             recorded = (
                 f"{stamp}: Enter this code: <redacted>"
-                if line.startswith("Enter this code: ") else output
+                if line.startswith("Enter this code: ")
+                else _DEVICE_CODE_QUERY.sub(_redact_device_code_query, output)
             )
             self._logs.append(recorded)
             self._notify("log", recorded)

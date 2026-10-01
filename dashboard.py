@@ -172,8 +172,8 @@ class Dashboard:
         self._failures: dict[str, deque[float]] = {}
         self.app = web.Application(
             client_max_size=64 * 1024,
-            middlewares=[self._headers, self._host, self._origin, self._post_type,
-                         self._auth, self._readonly, self._errors],
+            middlewares=[self._headers, self._host, self._origin, self._auth,
+                         self._readonly, self._post_type, self._errors],
         )
         self.app.router.add_get("/", self._index)
         self.app.router.add_get("/static/{name}", self._static)
@@ -209,8 +209,15 @@ class Dashboard:
             self.manager.print("Dashboard exposed without TLS; use a reverse proxy for remote access")
 
     async def stop(self) -> None:
-        for ws in tuple(self._sockets):
-            await ws.close(code=WSCloseCode.GOING_AWAY)
+        closes = {asyncio.create_task(ws.close(code=WSCloseCode.GOING_AWAY))
+                  for ws in tuple(self._sockets)}
+        if closes:
+            done, pending = await asyncio.wait(closes, timeout=2)
+            for task in pending:
+                task.cancel()
+            for task in done:
+                if not task.cancelled() and task.exception() is not None:
+                    logger.warning("Dashboard WebSocket close failed: %s", task.exception())
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -281,10 +288,10 @@ class Dashboard:
     async def _auth(self, request: web.Request, handler: Any) -> web.StreamResponse:
         if self.config.token is not None and request.path.startswith("/api/") and request.path != "/api/ws":
             remote = request.remote or "unknown"
-            if self._limited(remote):
-                return self._error(429, "too many authentication attempts")
             header = request.headers.get("Authorization", "")
-            if not header.startswith("Bearer ") or not self._matches(header[7:]):
+            if not (header.startswith("Bearer ") and self._matches(header[7:])):
+                if self._limited(remote):
+                    return self._error(429, "too many authentication attempts")
                 self._failed(remote)
                 return self._error(401, "unauthorized")
         return await handler(request)
@@ -389,8 +396,6 @@ class Dashboard:
 
     async def _ws(self, request: web.Request) -> web.StreamResponse:
         remote = request.remote or "unknown"
-        if self.config.token is not None and self._limited(remote):
-            return self._error(429, "too many authentication attempts")
         ws = web.WebSocketResponse(heartbeat=20)
         self._secure_headers(ws, request.path)
         await ws.prepare(request)
@@ -405,7 +410,8 @@ class Dashboard:
                 except (asyncio.TimeoutError, json.JSONDecodeError, TypeError, ValueError):
                     data = None
                 if not isinstance(data, dict) or not isinstance(data.get("auth"), str) or not self._matches(data["auth"]):
-                    self._failed(remote)
+                    if not self._limited(remote):
+                        self._failed(remote)
                     await ws.close(code=WSCloseCode.POLICY_VIOLATION)
                     return ws
             await ws.send_json({"type": "state", **self._sanitize(self.manager.actions.state())})
@@ -431,12 +437,14 @@ class Dashboard:
                     except asyncio.TimeoutError:
                         pass
                     wake.clear()
-                    while pending_logs:
-                        await ws.send_json({"type": "log", "line": pending_logs.popleft()})
                     if changed and time.monotonic() - last_state >= 1.0:
                         changed = False
                         await ws.send_json({"type": "state", **self._sanitize(self.manager.actions.state())})
                         last_state = time.monotonic()
+                    for _ in range(min(len(pending_logs), 50)):
+                        await ws.send_json({"type": "log", "line": pending_logs.popleft()})
+                    if pending_logs:
+                        wake.set()
 
             listener = on_event
             self.manager.subscribe(listener)

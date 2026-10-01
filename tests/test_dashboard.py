@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ast
 from contextlib import redirect_stdout
 import io
 import json
@@ -139,6 +140,49 @@ runpy.run_path("main.py", run_name="__main__")
             self.assertIn("Dashboard cannot bind: port in use", result.stdout)
             self.assertNotIn("miner started", result.stdout + result.stderr)
 
+    def test_dashboard_error_handler_is_guarded_by_cli_mode(self) -> None:
+        module = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        main = next(node for node in ast.walk(module)
+                    if isinstance(node, ast.AsyncFunctionDef) and node.name == "main")
+        handlers = [node for node in ast.walk(main)
+                    if isinstance(node, ast.ExceptHandler)
+                    and isinstance(node.type, ast.Name) and node.type.id == "DashboardError"]
+        guards = [node for node in ast.walk(main)
+                  if isinstance(node, ast.If) and ast.unparse(node.test) == "cli_mode and dashboard_config.enabled"]
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(len(guards), 1)
+        self.assertTrue(any(node is handlers[0] for node in ast.walk(guards[0])))
+
+    def test_dashboard_stop_failure_or_timeout_still_shuts_down_client(self) -> None:
+        code = """
+import asyncio, runpy, sys
+import dashboard, twitch
+async def fake_start(self):
+    pass
+async def fake_stop(self):
+    if sys.argv[-1] == "raise":
+        raise RuntimeError("close failed")
+    await asyncio.Event().wait()
+async def fake_run(self):
+    self.gui.close()
+async def tracked_shutdown(self):
+    print("CLIENT_SHUTDOWN_REACHED")
+dashboard.Dashboard.start = fake_start
+dashboard.Dashboard.stop = fake_stop
+twitch.Twitch.run = fake_run
+twitch.Twitch.shutdown = tracked_shutdown
+mode = sys.argv[-1]
+sys.argv = ["main.py", "cli", "run", "--dashboard"]
+runpy.run_path("main.py", run_name="__main__")
+"""
+        for mode in ("raise", "slow"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                env = {**os.environ, "TDM_DATA_DIR": directory}
+                result = subprocess.run([sys.executable, "-c", code, mode], env=env,
+                                        capture_output=True, text=True, check=False, timeout=8)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("CLIENT_SHUTDOWN_REACHED", result.stdout)
+
 
 class FakeManager:
     def __init__(self) -> None:
@@ -248,8 +292,9 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                                        headers={"Authorization": "Bearer wrong"})
             self.assertIn(response.status, (401, 429))
         self.assertEqual((await self.call()).status, 429)
-        self.dashboard._failures.clear()
         token = {"Authorization": "Bearer private-token"}
+        self.assertEqual((await self.call(headers=token)).status, 200)
+        self.dashboard._failures.clear()
         self.assertEqual((await self.call(headers=token)).status, 200)
         self.assertEqual((await self.call(headers={**token,
             "Origin": "https://127.0.0.1:8787"})).status, 200)
@@ -270,11 +315,15 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             "Origin": "https://other.example.com"})).status, 403)
         self.assertEqual((await self.call(path="/api/ws", headers={"Origin": "http://evil.example"})).status, 403)
         self.assertEqual((await self.call(method="POST", path="/api/reload",
-                                          headers={**token, "Content-Type": "text/plain"})).status, 415)
+                                          headers={**token, "Content-Type": "text/plain"})).status, 403)
         self.assertEqual((await self.call(method="POST", path="/api/reload",
                                           headers={**token, "Content-Type": "application/json"})).status, 403)
         self.assertEqual((await self.call(method="POST", path="/api/reload",
                                           headers={"Content-Type": "application/json"})).status, 401)
+        self.dashboard.config = DashboardConfig(port=8787, token="private-token", readonly=False,
+                                                enabled=True)
+        self.assertEqual((await self.call(method="POST", path="/api/reload",
+                                          headers={**token, "Content-Type": "text/plain"})).status, 415)
 
     async def test_action_error_statuses_and_token_redaction(self) -> None:
         request = make_mocked_request("GET", "/api/state", app=self.dashboard.app)
@@ -367,6 +416,29 @@ class DashboardMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         request = make_mocked_request("GET", "/api/logs?tail=1", app=self.dashboard.app)
         response = await self.dashboard._get(request)
         self.assertEqual(json.loads(response.text), ["<redacted> in a log line"])
+
+    async def test_stuck_websocket_close_does_not_block_cleanup(self) -> None:
+        closed = []
+
+        class StuckSocket:
+            async def close(self, **kwargs):
+                await asyncio.Event().wait()
+
+        class QuickSocket:
+            async def close(self, **kwargs):
+                closed.append(kwargs["code"])
+
+        class Runner:
+            async def cleanup(self):
+                closed.append("cleanup")
+
+        self.dashboard._sockets = {StuckSocket(), QuickSocket()}
+        self.dashboard._runner = Runner()
+        start = asyncio.get_running_loop().time()
+        await asyncio.wait_for(self.dashboard.stop(), timeout=2.5)
+        self.assertLess(asyncio.get_running_loop().time() - start, 2.5)
+        self.assertIn(WSCloseCode.GOING_AWAY, closed)
+        self.assertIn("cleanup", closed)
 
 
 class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
@@ -465,8 +537,8 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
             self.base + "/api/state", headers={"Authorization": "Bearer wrong-token"}
         ) as response:
             self.assertEqual(response.status, 429)
-        self.dashboard._failures.clear()
         async with self.session.get(self.base + "/api/state", headers={"Authorization": "Bearer private-token"}) as response:
+            self.assertEqual(response.status, 200)
             self.assertTrue((await response.json())["readonly"])
         async with self.session.post(self.base + "/api/reload", json={},
                                      headers={"Authorization": "Bearer private-token"}) as response:
@@ -508,3 +580,47 @@ class DashboardSocketTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DashboardError):
             await other.start()
         await other.stop()
+
+    async def test_websocket_valid_token_passes_shared_ip_limit(self) -> None:
+        await self.dashboard.stop()
+        self.dashboard = Dashboard(self.manager, self.twitch,
+                                   DashboardConfig(port=0, token="private-token", enabled=True,
+                                                   auth_timeout=0.05))
+        await self.dashboard.start()
+        self.base = f"http://127.0.0.1:{self.dashboard.port}"
+        for _ in range(5):
+            async with self.session.get(self.base + "/api/state") as response:
+                self.assertEqual(response.status, 401)
+        async with self.session.ws_connect(self.base + "/api/ws") as ws:
+            await ws.send_json({"auth": "private-token"})
+            self.assertEqual((await ws.receive_json())["type"], "state")
+        async with self.session.ws_connect(self.base + "/api/ws") as ws:
+            await ws.send_json({"auth": "wrong-token"})
+            await ws.receive()
+            self.assertEqual(ws.close_code, WSCloseCode.POLICY_VIOLATION)
+        self.assertEqual(len(next(iter(self.dashboard._failures.values()))), 5)
+
+    async def test_state_is_delivered_during_continuous_logs(self) -> None:
+        async with self.session.ws_connect(self.base + "/api/ws") as ws:
+            await ws.receive_json()
+            self.manager._logged_in = True
+            self.manager.emit("change")
+
+            async def produce_logs():
+                while True:
+                    self.manager.emit("log", "busy")
+                    await asyncio.sleep(0.001)
+
+            producer = asyncio.create_task(produce_logs())
+            try:
+                async def receive_state():
+                    while True:
+                        message = await ws.receive_json()
+                        if message["type"] == "state":
+                            return message
+
+                state = await asyncio.wait_for(receive_state(), timeout=2)
+                self.assertTrue(state["logged_in"])
+            finally:
+                producer.cancel()
+                await asyncio.gather(producer, return_exceptions=True)

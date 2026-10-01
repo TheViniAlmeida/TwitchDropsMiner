@@ -79,7 +79,7 @@ mode hides controls and rejects changes. Host and Origin checks protect the API;
 The panel reads game filters from `GET /api/priority` and `GET /api/exclude`; changes use the
 matching `POST` routes.
 Authentication failures are limited per client IP, so clients behind one reverse proxy share
-the limit. Use TLS at the proxy for remote access.
+the limit for invalid tokens while valid tokens remain usable. Use TLS at the proxy for remote access.
 
 For nginx, set `TDM_DASHBOARD_ORIGINS=https://your.host` and use
 `location / { proxy_pass http://127.0.0.1:8787; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; }`.
