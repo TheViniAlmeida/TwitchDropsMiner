@@ -36,6 +36,13 @@ logger = logging.getLogger("TwitchDrops")
 ws_logger = logging.getLogger("TwitchDrops.websocket")
 
 
+def _redacted_sent_message(message: JsonType) -> JsonType:
+    redacted = message.copy()
+    if isinstance(data := message.get("data"), dict) and "auth_token" in data:
+        redacted["data"] = {**data, "auth_token": "<redacted>"}
+    return redacted
+
+
 class Websocket:
     def __init__(self, pool: WebsocketPool, index: int):
         self._pool: WebsocketPool = pool
@@ -330,7 +337,7 @@ class Websocket:
             await ws.send_json(message, dumps=json_minify)
         except aiohttp.ClientConnectionError:
             raise WebsocketClosed(received=False)
-        ws_logger.debug(f"Websocket[{self._idx}] sent: {message}")
+        ws_logger.debug(f"Websocket[{self._idx}] sent: {_redacted_sent_message(message)}")
 
 
 class WebsocketPool:

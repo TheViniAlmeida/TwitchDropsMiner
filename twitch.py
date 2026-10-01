@@ -66,6 +66,34 @@ logger = logging.getLogger("TwitchDrops")
 gql_logger = logging.getLogger("TwitchDrops.gql")
 
 
+def _redacted_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return a log-safe copy without changing the actual request arguments."""
+    sensitive_headers = {"authorization", "client-integrity", "cookie", "x-device-id"}
+    sensitive_fields = {
+        "token", "access_token", "refresh_token", "device_code",
+        "password", "client_secret", "auth-token",
+    }
+    redacted = kwargs.copy()
+    for name, value in kwargs.items():
+        if name == "headers" and isinstance(value, abc.Mapping):
+            redacted[name] = {
+                key: "<redacted>" if str(key).casefold() in sensitive_headers else item
+                for key, item in value.items()
+            }
+        elif name in ("data", "json", "params") and isinstance(value, abc.Mapping):
+            redacted[name] = {
+                key: "<redacted>" if str(key).casefold() in sensitive_fields else item
+                for key, item in value.items()
+            }
+        elif name == "proxy" and value:
+            proxy = URL(value)
+            if proxy.password is not None:
+                redacted[name] = str(proxy.with_password("***"))
+        elif name == "cookies":
+            redacted[name] = "<redacted>"
+    return redacted
+
+
 class SkipExtraJsonDecoder(json.JSONDecoder):
     def decode(self, s: str, *args):
         # skip whitespace check
@@ -1251,7 +1279,7 @@ class Twitch:
         method = method.upper()
         if self.settings.proxy and "proxy" not in kwargs:
             kwargs["proxy"] = self.settings.proxy
-        logger.debug(f"Request: ({method=}, {url=}, {kwargs=})")
+        logger.debug(f"Request: ({method=}, {url=}, kwargs={_redacted_request_kwargs(kwargs)!r})")
         session_timeout = timedelta(seconds=session.timeout.total or 0)
         backoff = ExponentialBackoff(maximum=3*60)
         for delay in backoff:
@@ -1269,7 +1297,7 @@ class Twitch:
                     session.request(method, url, **kwargs)
                 )
                 assert response is not None
-                logger.debug(f"Response: {response.status}: {response}")
+                logger.debug("Response status: %s", response.status)
                 if response.status < 500:
                     # pre-read the response to avoid getting errors outside of the context manager
                     raw_response = await response.read()  # noqa
