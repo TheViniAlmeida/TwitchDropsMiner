@@ -151,11 +151,17 @@ if __name__ == "__main__":
             action_parser.add_argument("game")
         logout_parser = cli_subparsers.add_parser("logout")
         logout_parser.add_argument("--yes", action="store_true")
+        auth_parser = cli_subparsers.add_parser("auth")
+        auth_subparsers = auth_parser.add_subparsers(dest="auth_command", required=True)
+        for action in ("status", "backup", "restore"):
+            auth_subparsers.add_parser(action)
+        import_parser = auth_subparsers.add_parser("import")
+        import_parser.add_argument("--from-jar", dest="from_jar")
         args = parser.parse_args(namespace=ParsedArgs())
         if args.mode == "cli" and args.command is None:
             cli_parser.print_help()
             parser.exit(2)
-        if args.command in ("settings", "priority", "exclude", "logout"):
+        if args.command in ("settings", "priority", "exclude", "logout", "auth"):
             from cli_commands import run_offline
 
             sys.exit(run_offline(args))

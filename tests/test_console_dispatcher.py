@@ -4,7 +4,7 @@ import asyncio
 from collections import OrderedDict
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from cli import CLIManager
 from constants import State
@@ -114,7 +114,8 @@ class ConsoleDispatcherTests(unittest.IsolatedAsyncioTestCase):
                 self.twitch.request = Mock(return_value=RequestContext())
                 self.twitch.states.clear()
                 self.messages.clear()
-                await self.manager._logout()
+                with patch.dict("os.environ", {"TDM_ALLOW_LOGOUT": "1"}), patch("cli_actions.ensure_backup"):
+                    await self.manager._logout()
 
                 self.twitch.request.assert_called_once_with(
                     "POST", "https://id.twitch.tv/oauth2/revoke",

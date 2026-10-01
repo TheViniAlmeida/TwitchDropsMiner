@@ -10,11 +10,13 @@ from functools import partial
 from collections import abc, deque, OrderedDict
 from datetime import datetime, timedelta, timezone
 from contextlib import suppress, asynccontextmanager
+from pathlib import Path
 from typing import Any, Literal, Final, NoReturn, overload, cast, TYPE_CHECKING
 
 import aiohttp
 from yarl import URL
 
+from auth_session import backup_session, ensure_backup as _ensure_backup
 from translate import _
 from channel import Channel
 from websocket import WebsocketPool
@@ -116,6 +118,14 @@ def _oauth_error_reason(message: object, *secrets: str) -> str:
     return reason or "request rejected"
 
 
+def ensure_backup(path: Path) -> None:
+    """Best effort: never let a failing backup stop the login flow."""
+    try:
+        _ensure_backup(path)
+    except OSError as exc:
+        logger.warning("Session backup failed: %s", exc.strerror or type(exc).__name__)
+
+
 class _AuthState:
     def __init__(self, twitch: Twitch):
         self._twitch: Twitch = twitch
@@ -143,6 +153,7 @@ class _AuthState:
             session = self._twitch._session
             if session is not None:
                 jar = cast(aiohttp.CookieJar, session.cookie_jar)
+                ensure_backup(COOKIES_PATH)
                 jar.clear()
                 COOKIES_PATH.unlink(missing_ok=True)
 
@@ -202,9 +213,13 @@ class _AuthState:
                     if response.status != 200:
                         message = response_json.get("message") if isinstance(response_json, dict) else None
                         reason = _oauth_error_reason(message)
+                        hint = (
+                            '. New device logins for this client are blocked by Twitch; restore a saved session with "cli auth restore" or "cli auth import --from-jar PATH"'
+                            if reason.casefold() == "invalid client" else ""
+                        )
                         raise LoginException(
                             f"Twitch rejected the device login for client {client_name}: "
-                            f"{response.status} {reason}"
+                            f"{response.status} {reason}{hint}"
                         )
                     if not isinstance(response_json, dict) or not response_json.get("device_code"):
                         reason = "missing device_code" if isinstance(response_json, dict) else "invalid JSON response"
@@ -498,6 +513,7 @@ class _AuthState:
                             # the access token we have is invalid - clear the cookie and reauth
                             logger.info("Restored session is invalid")
                             assert client_info.CLIENT_URL.host is not None
+                            ensure_backup(COOKIES_PATH)
                             jar.clear_domain(client_info.CLIENT_URL.host)
                             continue
                         elif response.status == 200:
@@ -510,6 +526,7 @@ class _AuthState:
                     break
                 # otherwise, we need to delete the entire cookie file and clear the jar
                 logger.info("Cookie client ID mismatch")
+                ensure_backup(COOKIES_PATH)
                 jar.clear()
                 COOKIES_PATH.unlink(missing_ok=True)
             else:
@@ -521,6 +538,11 @@ class _AuthState:
             # update our cookie and save it
             jar.update_cookies(cookie, client_info.CLIENT_URL)
             jar.save(COOKIES_PATH)
+            try:
+                if backup := backup_session(COOKIES_PATH):
+                    logger.info("Saved session backup: %s", backup)
+            except OSError as exc:
+                logger.warning("Session backup failed: %s", exc.strerror or type(exc).__name__)
         self._twitch.gui.set_logged_in(True)
         self._logged_in.set()
 

@@ -49,7 +49,7 @@ class OAuthLoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_client_is_permanent(self) -> None:
         with self.assertRaisesRegex(
             LoginException,
-            "^Twitch rejected the device login for client ANDROID_APP: 400 invalid client$",
+            '^Twitch rejected the device login for client ANDROID_APP: 400 invalid client\\. New device logins for this client are blocked by Twitch; restore a saved session with "cli auth restore" or "cli auth import --from-jar PATH"$',
         ):
             await self._login_with([(400, {"status": 400, "message": "invalid client"})])
 

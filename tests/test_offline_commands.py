@@ -19,6 +19,7 @@ class OfflineCommandsTests(unittest.TestCase):
         self.data_dir = Path(self.temporary_directory.name)
         self.environment = os.environ.copy()
         self.environment["TDM_DATA_DIR"] = str(self.data_dir)
+        self.environment.pop("TDM_ALLOW_LOGOUT", None)
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -88,12 +89,19 @@ class OfflineCommandsTests(unittest.TestCase):
         result = self.cli("exclude", "remove", "Ignored Game")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_logout_yes_deletes_cookies_and_nontty_requires_yes(self) -> None:
+    def test_logout_is_disabled_by_default_and_allowed_moves_cookies(self) -> None:
         cookies = self.data_dir / "cookies.jar"
         cookies.write_text("cookie data", encoding="utf8")
         result = self.cli("logout", "--yes")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("logout disabled: Twitch blocks new device logins for ANDROID_APP", result.stderr)
+        self.assertTrue(cookies.exists())
+
+        self.environment["TDM_ALLOW_LOGOUT"] = "1"
+        result = self.cli("logout", "--yes")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(cookies.exists())
+        self.assertEqual((self.data_dir / "cookies.jar.bak").read_text(encoding="utf8"), "cookie data")
 
         result = self.cli("logout")
         self.assertEqual(result.returncode, 2, result.stderr)

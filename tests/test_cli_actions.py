@@ -155,12 +155,27 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
         self.twitch.request = Mock(return_value=Request())
-        with self.assertRaises(ActionRejected) as context:
-            await self.actions.logout()
+        with patch.dict("os.environ", {"TDM_ALLOW_LOGOUT": "1"}), patch("cli_actions.ensure_backup") as backup:
+            with self.assertRaises(ActionRejected) as context:
+                await self.actions.logout()
+        backup.assert_called_once_with()
         self.assertEqual(str(context.exception), "logout failed (HTTP 403)")
         self.assertNotIn("token-value", str(context.exception))
         self.assertEqual(self.twitch.states, [State.RESTART])
         auth.invalidate.assert_not_called()
+
+    async def test_logout_requires_explicit_opt_in_before_get_auth(self) -> None:
+        self.twitch._client_type = SimpleNamespace(CLIENT_ID="client-id")
+        self.twitch.get_auth = AsyncMock()
+        with patch.dict("os.environ", {"TDM_ALLOW_LOGOUT": ""}):
+            with self.assertRaises(ActionRejected) as context:
+                await self.actions.logout()
+        self.assertEqual(
+            str(context.exception),
+            "logout disabled: Twitch blocks new device logins for unknown; "
+            "this session cannot be recreated. Set TDM_ALLOW_LOGOUT=1 to allow it.",
+        )
+        self.twitch.get_auth.assert_not_called()
 
     async def test_inventory_events_are_emitted(self) -> None:
         events = []

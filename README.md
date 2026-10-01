@@ -238,3 +238,11 @@ placed past the period character at the end.
 @DogancanYr, @Elderly-Emre, @Hweord - For the Turkish (Türkçe) translation corrections and revisions.  
 @Nollasko - For the entirety of the Ukrainian (Українська) translation and revisions.  
 @kilroy98 - For the Ukrainian (Українська) translation corrections and revisions.  
+
+# Login in 2026
+
+Since September 18, 2026, Twitch has blocked new device logins for the ANDROID_APP client. Existing Android sessions may still work: preserve `cookies.jar`; a new device login cannot recreate one. New logins require a browser/integrity-based method, which this project does not yet implement.
+
+The miner automatically copies a validated session to `cookies.jar.bak` and protects the existing session before clearing it. Use `cli auth status` to check a saved session, `cli auth backup` for an immediate backup, `cli auth restore` to recover it (the previous session goes to `cookies.jar.bak.prev`), or `cli auth import --from-jar PATH` to import another saved jar. `cli auth import` also accepts `TDM_AUTH_TOKEN` or a token from stdin and only accepts ANDROID_APP tokens. Importing an existing session preserves the prior jar as a backup if there is no backup yet.
+
+Logout is disabled by default. Set `TDM_ALLOW_LOGOUT=1` to allow `cli logout --yes` or online logout; the offline command moves the jar to its backup instead of deleting it. **The auth token grants full account access.** Keep the jar and its backups private with permissions `0600`; never share a jar or token.
