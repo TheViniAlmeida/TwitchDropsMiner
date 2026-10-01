@@ -211,6 +211,9 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
                          "Drop claim ID: <id>#abc-def#<id>")
         self.assertEqual(redact_ids('{"user_id": "123456789", "current_progress_min": 225}'),
                          '{"user_id": "<id>", "current_progress_min": 225}')
+        self.assertEqual(redact_ids('{"user_id":1234567,"channel_id":7654321}'),
+                         '{"user_id":<id>,"channel_id":<id>}')
+        self.assertEqual(redact_ids("http://[::1]:23450/ localhost:23451"), "http://[::1]:23450/ localhost:23451")
         self.assertEqual(redact_ids("Tier 1 (For Honor, 25/60) v15.3 1.2345678 http://127.0.0.1:23450/"),
                          "Tier 1 (For Honor, 25/60) v15.3 1.2345678 http://127.0.0.1:23450/")
 

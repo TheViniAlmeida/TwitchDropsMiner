@@ -87,6 +87,9 @@ def _redacted_request_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
             }
         elif name == "proxy" and value:
             proxy = URL(value)
+            # some providers put the credential in the user name: mask both parts
+            if proxy.user is not None:
+                proxy = proxy.with_user("***")
             if proxy.password is not None:
                 proxy = proxy.with_password("***")
             # a proxy query may carry a credential too

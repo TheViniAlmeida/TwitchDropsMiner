@@ -131,6 +131,9 @@ def setting_value(settings: Settings, key: str) -> str:
     value = getattr(settings, key)
     if key == "proxy" and value:
         proxy = URL(value)
+        # some providers put the credential in the user name: mask both parts
+        if proxy.user is not None:
+            proxy = proxy.with_user("***")
         if proxy.password is not None:
             proxy = proxy.with_password("***")
         if proxy.query_string or proxy.fragment:

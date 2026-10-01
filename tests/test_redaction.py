@@ -34,7 +34,7 @@ class RedactionTests(unittest.TestCase):
                                            "device_code": "<redacted>", "other": "public"})
         self.assertTrue(all(value == "<redacted>" for value in redacted["json"].values()))
         self.assertTrue(all(value == "<redacted>" for value in redacted["params"].values()))
-        self.assertEqual(redacted["proxy"], "http://alice:***@localhost:8080")
+        self.assertEqual(redacted["proxy"], "http://***:***@localhost:8080")
         self.assertEqual(_redacted_request_kwargs({"proxy": URL("http://proxy:8080/?token=sample")})["proxy"],
                          "http://proxy:8080/?***")
         self.assertEqual(_redacted_request_kwargs({"proxy": URL("http://proxy:8080")})["proxy"],
@@ -60,7 +60,9 @@ class RedactionTests(unittest.TestCase):
     def test_setting_value_masks_proxy_password(self) -> None:
         proxy = URL("http://alice:sample@localhost:8080")
         settings = SimpleNamespace(proxy=proxy)
-        self.assertEqual(setting_value(settings, "proxy"), "http://alice:***@localhost:8080")
+        self.assertEqual(setting_value(settings, "proxy"), "http://***:***@localhost:8080")
+        self.assertEqual(setting_value(SimpleNamespace(proxy=URL("http://token-user@proxy:8080")), "proxy"),
+                         "http://***@proxy:8080")
         self.assertEqual(settings.proxy, proxy)
         self.assertEqual(settings.proxy.password, "sample")
         settings.proxy = URL("http://proxy:8080/?token=sample#frag")

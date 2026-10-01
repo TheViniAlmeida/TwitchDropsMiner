@@ -48,8 +48,8 @@ _TOPIC_ID = re.compile(r"\b([a-z][a-z-]*[a-z])\.\d+\b")
 
 # any long number in a log line is treated as an ID: Twitch user/channel IDs and composite
 # drop instance IDs (user#campaign#drop) all have 5+ digits; minutes, counts and ports
-# (":23450") stay visible
-_LONG_NUMBER = re.compile(r"(?<![\d.:])\d{5,}(?![\d.])")
+# ("host:23450", "[::1]:23450") stay visible, JSON values ('"user_id":1234567') do not
+_LONG_NUMBER = re.compile(r"(?<![\d.])(?<![\w\]]:)\d{5,}(?![\d.])")
 
 
 def redact_ids(text: str) -> str:
