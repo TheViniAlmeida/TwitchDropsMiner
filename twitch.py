@@ -106,6 +106,13 @@ class SkipExtraJsonDecoder(json.JSONDecoder):
 SAFE_LOADS = lambda s: json.loads(s, cls=SkipExtraJsonDecoder)
 
 
+def _oauth_error_reason(message: object) -> str:
+    if not isinstance(message, str):
+        return "request rejected"
+    reason = "".join(char for char in " ".join(message.split()) if char.isprintable()).strip()[:120]
+    return reason or "request rejected"
+
+
 class _AuthState:
     def __init__(self, twitch: Twitch):
         self._twitch: Twitch = twitch
@@ -190,10 +197,8 @@ class _AuthState:
                     except (aiohttp.ContentTypeError, ValueError):
                         response_json = None
                     if response.status != 200:
-                        reason = "invalid client" if (
-                            isinstance(response_json, dict)
-                            and response_json.get("message") == "invalid client"
-                        ) else "request rejected"
+                        message = response_json.get("message") if isinstance(response_json, dict) else None
+                        reason = _oauth_error_reason(message)
                         raise LoginException(
                             f"Twitch rejected the device login for client {client_name}: "
                             f"{response.status} {reason}"
@@ -235,8 +240,22 @@ class _AuthState:
                         data=payload,
                         invalidate_after=expires_at,
                     ) as response:
-                        # 200 means success, 400 means the user haven't entered the code yet
                         if response.status != 200:
+                            try:
+                                response_json = await response.json()
+                            except (aiohttp.ContentTypeError, ValueError):
+                                response_json = None
+                            message = response_json.get("message") if isinstance(response_json, dict) else None
+                            reason = _oauth_error_reason(message).casefold()
+                            if reason == "slow_down":
+                                interval += 5
+                            elif reason in (
+                                "invalid device code", "access_denied", "expired_token", "invalid client"
+                            ):
+                                raise LoginException(
+                                    f"Twitch rejected the token login for client {client_name}: {reason}"
+                                )
+                            # Unknown or unreadable errors may be transient; retain the existing polling behavior.
                             continue
                         try:
                             response_json = await response.json()
