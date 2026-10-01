@@ -81,6 +81,28 @@ class OAuthLoginTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self._login_with([(200, {"interval": 5})])
 
+    async def test_device_error_masks_response_codes(self) -> None:
+        with self.assertRaises(LoginException) as raised:
+            await self._login_with([(400, {
+                "message": "device local-device-code user LOCAL123 denied",
+                "device_code": "local-device-code", "user_code": "LOCAL123",
+            })])
+        self.assertIn("device <redacted> user <redacted> denied", str(raised.exception))
+        self.assertNotIn("local-device-code", str(raised.exception))
+        self.assertNotIn("LOCAL123", str(raised.exception))
+
+    async def test_missing_device_code_uses_sanitized_message_and_hint(self) -> None:
+        with self.assertRaises(LoginException) as raised:
+            await self._login_with([(200, {"message": "  invalid\nclient  "})])
+        self.assertIn("200 invalid client. New device logins", str(raised.exception))
+        self.assertIn("cli auth restore", str(raised.exception))
+
+    async def test_missing_device_code_masks_user_code(self) -> None:
+        with self.assertRaises(LoginException) as raised:
+            await self._login_with([(200, {"message": "bad code LOCAL123", "user_code": "LOCAL123"})])
+        self.assertIn("bad code <redacted>", str(raised.exception))
+        self.assertNotIn("LOCAL123", str(raised.exception))
+
     async def test_non_json_device_response(self) -> None:
         with self.assertRaisesRegex(
             LoginException,

@@ -14,7 +14,7 @@ from cli_commands import (
     set_setting,
     setting_value,
 )
-from constants import State
+from constants import COOKIES_PATH, State
 from auth_session import ensure_backup, logout_allowed, logout_disabled_message
 
 if TYPE_CHECKING:
@@ -204,7 +204,8 @@ class Actions:
     async def logout(self) -> dict[str, Any]:
         if not logout_allowed():
             raise ActionRejected(logout_disabled_message(self.twitch._client_type))
-        ensure_backup()
+        if not ensure_backup(COOKIES_PATH):
+            raise ActionRejected("cannot back up the saved session; refusing logout")
         auth_state = await self.twitch.get_auth()
         async with self.twitch.request(
             "POST",

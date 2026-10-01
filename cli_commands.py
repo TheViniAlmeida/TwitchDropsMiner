@@ -13,7 +13,7 @@ from yarl import URL
 import aiohttp
 
 from auth_session import (
-    backup_previous, backup_session, client_name, ensure_backup, logout_allowed,
+    archive_count, backup_session, client_name, logout_allowed,
     logout_disabled_message, read_token, restore_session, validate_token, write_session,
 )
 
@@ -228,6 +228,7 @@ def _run_auth(args: Any) -> int:
             print(f"login: {data['login']}")
             print(f"expires_in: {expiration}")
             print(f"backup: {backup}")
+            print(f"archives: {archive_count(COOKIES_PATH)}")
             return 0
         if data["client_id"] != ClientType.ANDROID_APP.CLIENT_ID:
             print(
@@ -235,9 +236,11 @@ def _run_auth(args: Any) -> int:
                 file=sys.stderr,
             )
             return 2
-        ensure_backup(COOKIES_PATH)
-        backup_previous(COOKIES_PATH)
+        if COOKIES_PATH.exists() and backup_session(COOKIES_PATH) is None:
+            raise ValueError("cannot back up the saved session; refusing to replace it")
         write_session(token, data["user_id"], ClientType.ANDROID_APP, COOKIES_PATH)
+        if backup_session(COOKIES_PATH) is None:
+            raise ValueError("cannot back up the imported session")
         print(f"imported session for {data['login']} (ANDROID_APP)")
         return 0
     except ValueError as exc:
@@ -266,15 +269,21 @@ def run_offline(args: Any) -> int:
                     if not sys.stdin.isatty():
                         print("logout requires --yes when stdin is not a TTY", file=sys.stderr)
                         return 2
-                    answer = input("Move saved login to backup (cookies.jar.bak)? [y/N] ")
+                    answer = input("Back up and remove saved login? [y/N] ")
                     if answer.casefold() != "y":
                         print("logout cancelled")
                         return 0
                 if COOKIES_PATH.exists():
-                    backup = COOKIES_PATH.with_name(COOKIES_PATH.name + ".bak")
-                    os.chmod(COOKIES_PATH, 0o600)
-                    os.replace(COOKIES_PATH, backup)
-                    print(f"moved {COOKIES_PATH} to {backup}")
+                    try:
+                        backup = backup_session(COOKIES_PATH)
+                    except OSError as exc:
+                        print(f"cannot back up the saved session; refusing logout: {exc.strerror or type(exc).__name__}", file=sys.stderr)
+                        return 2
+                    if backup is None:
+                        print("cannot back up the saved session; refusing logout", file=sys.stderr)
+                        return 2
+                    COOKIES_PATH.unlink()
+                    print(f"backed up {COOKIES_PATH} to {backup} and removed login")
                 else:
                     print(f"no saved login at {COOKIES_PATH}")
                 return 0

@@ -322,7 +322,9 @@ if __name__ == "__main__":
                         if client._session is not None:
                             from constants import COOKIES_PATH
 
-                            client._session.cookie_jar.save(COOKIES_PATH)
+                            from auth_session import save_jar
+
+                            save_jar(client._session.cookie_jar, COOKIES_PATH)
                     except Exception:
                         logger.exception("Failed to save cookies after shutdown timeout")
             else:

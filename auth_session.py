@@ -4,6 +4,7 @@ import asyncio
 import os
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
@@ -37,18 +38,60 @@ def _copy_atomic(source: Path, destination: Path) -> Path:
             os.unlink(temporary)
     return destination
 
+def save_jar(jar: aiohttp.CookieJar, path: Path = COOKIES_PATH) -> None:
+    path = Path(path)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        try:
+            _private(descriptor)
+        finally:
+            os.close(descriptor)
+        jar.save(temporary)
+        with open(temporary, "rb") as saved:
+            os.fsync(saved.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+def _same_token(source: Path, backup: Path) -> bool:
+    try:
+        return read_token(source)[0] == read_token(backup)[0]
+    except Exception:
+        return False
+
+def _archives(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(path.name + ".bak.[0-9]*"),
+                  key=lambda archive: archive.stat().st_mtime, reverse=True)
+
+def archive_count(path: Path = COOKIES_PATH) -> int:
+    return len(_archives(Path(path)))
+
 
 def backup_session(path: Path = COOKIES_PATH) -> Path | None:
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         return None
-    return _copy_atomic(path, path.with_name(path.name + ".bak"))
+    backup = path.with_name(path.name + ".bak")
+    if backup.exists() and not _same_token(path, backup):
+        timestamp = datetime.fromtimestamp(backup.stat().st_mtime, timezone.utc).strftime("%Y%m%d-%H%M%S")
+        archive = backup.with_name(f"{backup.name}.{timestamp}")
+        suffix = 1
+        while archive.exists():
+            archive = backup.with_name(f"{backup.name}.{timestamp}.{suffix}")
+            suffix += 1
+        os.replace(backup, archive)
+        os.chmod(archive, 0o600)
+    result = _copy_atomic(path, backup)
+    for archive in _archives(path)[5:]:
+        archive.unlink()
+    return result
 
 
 def ensure_backup(path: Path = COOKIES_PATH) -> Path | None:
     path = Path(path)
     backup = path.with_name(path.name + ".bak")
-    if backup.exists():
+    if backup.exists() and _same_token(path, backup):
         return backup
     return backup_session(path)
 
@@ -103,17 +146,7 @@ def write_session(token: str, user_id: str, client: ClientInfo, path: Path = COO
     path = Path(path)
     with _cookie_jar() as jar:
         jar.update_cookies({"auth-token": token, "persistent": str(user_id)}, client.CLIENT_URL)
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            _private(descriptor)
-            os.close(descriptor)
-            jar.save(temporary)
-            with open(temporary, "rb") as saved:
-                os.fsync(saved.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        save_jar(jar, path)
 
 
 async def validate_token(session: aiohttp.ClientSession, token: str, *, proxy: URL | None = None) -> dict:

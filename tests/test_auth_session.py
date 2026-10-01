@@ -15,6 +15,7 @@ from yarl import URL
 import auth_session
 import cli_commands
 from constants import ClientType
+from exceptions import LoginException
 from twitch import _AuthState
 
 
@@ -37,16 +38,69 @@ class SessionFileTests(unittest.TestCase):
         self.assertNotEqual(Path(replace.call_args.args[0]), self.path)
 
     def test_ensure_backup_is_idempotent_and_restore_round_trip(self) -> None:
-        self.path.write_bytes(b"first")
+        auth_session.write_session("first", "1", ClientType.ANDROID_APP, self.path)
         backup = auth_session.ensure_backup(self.path)
-        self.path.write_bytes(b"second")
+        auth_session.write_session("second", "2", ClientType.ANDROID_APP, self.path)
         self.assertEqual(auth_session.ensure_backup(self.path), backup)
-        self.assertEqual(backup.read_bytes(), b"first")
+        self.assertEqual(auth_session.read_token(backup)[0], "second")
+        self.assertEqual(auth_session.archive_count(self.path), 1)
+        auth_session.write_session("first", "1", ClientType.ANDROID_APP, self.path)
+        self.assertEqual(auth_session.ensure_backup(self.path), backup)
+        self.assertEqual(auth_session.read_token(backup)[0], "first")
         restored, previous = auth_session.restore_session(self.path)
-        self.assertEqual(restored.read_bytes(), b"first")
-        self.assertEqual(previous.read_bytes(), b"second")
+        self.assertEqual(auth_session.read_token(restored)[0], "first")
+        self.assertEqual(auth_session.read_token(previous)[0], "first")
         self.assertEqual(stat.S_IMODE(restored.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o600)
+
+    def test_save_jar_is_atomic_private_and_preserves_old_on_failure(self) -> None:
+        with auth_session._cookie_jar() as jar:
+            jar.update_cookies({"auth-token": "new-secret"}, ClientType.ANDROID_APP.CLIENT_URL)
+            self.path.write_bytes(b"old")
+            with patch("auth_session.os.replace", wraps=os.replace) as replace:
+                auth_session.save_jar(jar, self.path)
+            self.assertEqual(replace.call_count, 1)
+            self.assertNotEqual(Path(replace.call_args.args[0]), self.path)
+            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+            saved = self.path.read_bytes()
+            with patch("auth_session.os.replace", side_effect=OSError(5, "storage failure")):
+                with self.assertRaises(OSError):
+                    auth_session.save_jar(jar, self.path)
+            self.assertEqual(self.path.read_bytes(), saved)
+            self.assertEqual(list(self.path.parent.glob(".cookies.jar.*")), [])
+
+    def test_archives_rotate_and_prune_five_newest(self) -> None:
+        for number in range(8):
+            auth_session.write_session(f"secret-{number}", "7", ClientType.ANDROID_APP, self.path)
+            backup = self.path.with_name("cookies.jar.bak")
+            if backup.exists():
+                timestamp = 1788220800 + number * 60
+                os.utime(backup, (timestamp, timestamp))
+            auth_session.backup_session(self.path)
+        archives = sorted(self.path.parent.glob("cookies.jar.bak.[0-9]*"))
+        self.assertEqual(len(archives), 5)
+        self.assertEqual(auth_session.archive_count(self.path), 5)
+        self.assertEqual([auth_session.read_token(archive)[0] for archive in archives],
+                         [f"secret-{number}" for number in range(2, 7)])
+        self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "secret-7")
+
+    def test_unreadable_backup_is_archived_not_discarded(self) -> None:
+        auth_session.write_session("valid", "1", ClientType.ANDROID_APP, self.path)
+        backup = self.path.with_name("cookies.jar.bak")
+        backup.write_bytes(b"unreadable")
+        auth_session.backup_session(self.path)
+        self.assertEqual(auth_session.archive_count(self.path), 1)
+        self.assertEqual(auth_session.read_token(backup)[0], "valid")
+        self.assertEqual(next(self.path.parent.glob("cookies.jar.bak.[0-9]*")).read_bytes(), b"unreadable")
+
+    def test_restore_keeps_archives(self) -> None:
+        for token in ("old", "middle", "new"):
+            auth_session.write_session(token, "1", ClientType.ANDROID_APP, self.path)
+            auth_session.backup_session(self.path)
+        archives = {archive.name: archive.read_bytes() for archive in self.path.parent.glob("cookies.jar.bak.[0-9]*")}
+        auth_session.restore_session(self.path)
+        self.assertEqual({archive.name: archive.read_bytes() for archive in self.path.parent.glob("cookies.jar.bak.[0-9]*")}, archives)
+        self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak.prev"))[0], "new")
 
     def test_cookie_jar_round_trip(self) -> None:
         auth_session.write_session("sensitive-token", "42", ClientType.ANDROID_APP, self.path)
@@ -101,11 +155,13 @@ class AuthCommandTests(unittest.TestCase):
             with patch.dict(os.environ, {"TDM_AUTH_TOKEN": "env-secret"}), patch("sys.stdin", io.StringIO("stdin-secret\n")):
                 self.assertEqual(self.run_auth("import"), 0)
             self.assertEqual(auth_session.read_token(self.path)[0], "env-secret")
-            self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "old-secret")
+            self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "env-secret")
             with patch.dict(os.environ, {"TDM_AUTH_TOKEN": ""}), patch("sys.stdin", io.StringIO("stdin-secret\n")):
                 self.assertEqual(self.run_auth("import"), 0)
             self.assertEqual(auth_session.read_token(self.path)[0], "stdin-secret")
-            self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "old-secret")
+            self.assertEqual(auth_session.read_token(self.path.with_name("cookies.jar.bak"))[0], "stdin-secret")
+            self.assertEqual({auth_session.read_token(archive)[0] for archive in self.path.parent.glob("cookies.jar.bak.[0-9]*")},
+                             {"old-secret", "env-secret"})
         for secret in ("old-secret", "env-secret", "stdin-secret"):
             self.assertNotIn(secret, self.output.getvalue() + self.errors.getvalue())
 
@@ -119,6 +175,25 @@ class AuthCommandTests(unittest.TestCase):
         self.assertEqual(self.errors.getvalue().strip(), "token belongs to client WEB; only ANDROID_APP sessions can mine drops today")
         self.assertNotIn("bad-secret", self.errors.getvalue() + self.output.getvalue())
 
+    def test_import_backup_failure_preserves_saved_session(self) -> None:
+        auth_session.write_session("old-secret", "8", ClientType.ANDROID_APP, self.path)
+        with patch.object(cli_commands, "validate_token", new_callable=AsyncMock) as validate:
+            validate.return_value = dict(client_id=ClientType.ANDROID_APP.CLIENT_ID, login="alice", user_id="7", expires_in=123)
+            with patch.dict(os.environ, {"TDM_AUTH_TOKEN": "new-secret"}), patch.object(
+                cli_commands, "backup_session", side_effect=OSError(28, "No space left on device")
+            ):
+                self.assertEqual(self.run_auth("import"), 2)
+        self.assertEqual(auth_session.read_token(self.path)[0], "old-secret")
+
+    def test_offline_logout_backup_failure_keeps_saved_session(self) -> None:
+        self.path.write_bytes(b"saved login")
+        with patch.dict(os.environ, {"TDM_ALLOW_LOGOUT": "1"}), patch.object(
+            cli_commands, "backup_session", side_effect=OSError(28, "No space left on device")
+        ):
+            self.assertEqual(cli_commands.run_offline(SimpleNamespace(command="logout", yes=True)), 2)
+        self.assertEqual(self.path.read_bytes(), b"saved login")
+        self.assertIn("refusing logout", self.errors.getvalue())
+
     def test_status_format_and_missing_invalid_exit_codes(self) -> None:
         self.assertEqual(self.run_auth("status"), 2)
         auth_session.write_session("secret", "7", ClientType.ANDROID_APP, self.path)
@@ -126,6 +201,7 @@ class AuthCommandTests(unittest.TestCase):
             validate.return_value = dict(client_id=ClientType.ANDROID_APP.CLIENT_ID, login="alice", user_id="7", expires_in=3600)
             self.assertEqual(self.run_auth("status"), 0)
             self.assertIn("client: ANDROID_APP\nlogin: alice\nexpires_in: 3600s\nbackup: none", self.output.getvalue())
+            self.assertIn("archives: 0", self.output.getvalue())
             auth_session.backup_session(self.path)
             validate.return_value["expires_in"] = None
             self.assertEqual(self.run_auth("status"), 0)
@@ -205,3 +281,50 @@ class ValidateTests(unittest.IsolatedAsyncioTestCase):
                 await state._validate()
             self.assertEqual(cleared, ["old-secret"])
             self.assertEqual(auth_session.read_token(path)[0], "new-secret")
+
+    async def test_backup_failure_preserves_jar_on_401_and_mismatch(self) -> None:
+        for status, client_id in ((401, None), (200, ClientType.WEB.CLIENT_ID)):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "cookies.jar"
+                auth_session.write_session("saved-secret", "7", ClientType.ANDROID_APP, path)
+                original = path.read_bytes()
+                jar = aiohttp.CookieJar()
+                jar.load(path)
+                response = AsyncMock()
+                response.status = status
+                response.json.return_value = {"client_id": client_id, "user_id": "7"}
+                request = AsyncMock()
+                request.__aenter__.return_value = response
+                twitch = SimpleNamespace(
+                    _client_type=ClientType.ANDROID_APP,
+                    get_session=AsyncMock(return_value=SimpleNamespace(cookie_jar=jar)),
+                    request=Mock(return_value=request),
+                    gui=SimpleNamespace(login=SimpleNamespace(update=Mock()), set_logged_in=Mock()),
+                )
+                state = _AuthState(twitch)
+                state.device_id = "device"
+                with patch("twitch.COOKIES_PATH", path), patch(
+                    "twitch._ensure_backup", side_effect=OSError(28, "No space left on device")
+                ):
+                    with self.assertRaisesRegex(
+                        LoginException,
+                        "cannot back up the saved session; refusing to discard it: No space left on device",
+                    ):
+                        await state._validate()
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(jar.filter_cookies(ClientType.ANDROID_APP.CLIENT_URL)["auth-token"].value, "saved-secret")
+
+    async def test_invalidate_keeps_file_and_jar_when_backup_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cookies.jar"
+            auth_session.write_session("saved-secret", "7", ClientType.ANDROID_APP, path)
+            jar = aiohttp.CookieJar()
+            jar.load(path)
+            twitch = SimpleNamespace(_session=SimpleNamespace(cookie_jar=jar), gui=SimpleNamespace(set_logged_in=Mock()))
+            state = _AuthState(twitch)
+            with patch("twitch.COOKIES_PATH", path), patch(
+                "twitch._ensure_backup", side_effect=OSError(28, "No space left on device")
+            ):
+                state.invalidate(delete_cookies=True)
+            self.assertTrue(path.exists())
+            self.assertEqual(jar.filter_cookies(ClientType.ANDROID_APP.CLIENT_URL)["auth-token"].value, "saved-secret")

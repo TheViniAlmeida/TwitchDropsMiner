@@ -107,6 +107,19 @@ class OfflineCommandsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("requires --yes", result.stderr)
 
+    def test_logout_archives_previous_backup_before_removing_current(self) -> None:
+        cookies = self.data_dir / "cookies.jar"
+        backup = self.data_dir / "cookies.jar.bak"
+        cookies.write_bytes(b"new login")
+        backup.write_bytes(b"previous login")
+        self.environment["TDM_ALLOW_LOGOUT"] = "1"
+        result = self.cli("logout", "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(cookies.exists())
+        self.assertEqual(backup.read_bytes(), b"new login")
+        self.assertEqual(len(list(self.data_dir.glob("cookies.jar.bak.[0-9]*"))), 1)
+        self.assertEqual(next(self.data_dir.glob("cookies.jar.bak.[0-9]*")).read_bytes(), b"previous login")
+
     def test_lock_held_exits_3(self) -> None:
         code = """
 import sys
