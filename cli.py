@@ -46,9 +46,16 @@ _USER_ID = re.compile(r"(user ID: )\d+", re.IGNORECASE)
 _TOPIC_ID = re.compile(r"\b([a-z][a-z-]*[a-z])\.\d+\b")
 
 
+# any long number in a log line is treated as an ID: Twitch user/channel IDs and composite
+# drop instance IDs (user#campaign#drop) all have 5+ digits; minutes, counts and ports
+# (":23450") stay visible
+_LONG_NUMBER = re.compile(r"(?<![\d.:])\d{5,}(?![\d.])")
+
+
 def redact_ids(text: str) -> str:
     """Hide account and pubsub IDs; safe for every output, including the local terminal."""
-    return _TOPIC_ID.sub(r"\1.<redacted>", _USER_ID.sub(r"\1<redacted>", text))
+    text = _TOPIC_ID.sub(r"\1.<redacted>", _USER_ID.sub(r"\1<redacted>", text))
+    return _LONG_NUMBER.sub("<id>", text)
 
 
 class IdRedactingFilter(logging.Filter):

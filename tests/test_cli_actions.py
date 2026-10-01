@@ -206,6 +206,13 @@ class ActionsTests(unittest.IsolatedAsyncioTestCase):
                                    "Adding topics: %s", ("user-drop-events.987654321",), None)
         self.assertTrue(IdRedactingFilter().filter(record))
         self.assertEqual(record.getMessage(), "Adding topics: user-drop-events.<redacted>")
+        from cli import redact_ids
+        self.assertEqual(redact_ids("Drop claim ID: 123456789#abc-def#99887766"),
+                         "Drop claim ID: <id>#abc-def#<id>")
+        self.assertEqual(redact_ids('{"user_id": "123456789", "current_progress_min": 225}'),
+                         '{"user_id": "<id>", "current_progress_min": 225}')
+        self.assertEqual(redact_ids("Tier 1 (For Honor, 25/60) v15.3 1.2345678 http://127.0.0.1:23450/"),
+                         "Tier 1 (For Honor, 25/60) v15.3 1.2345678 http://127.0.0.1:23450/")
 
     async def test_encoded_device_code_url_is_masked_in_log_events(self) -> None:
         events = []
