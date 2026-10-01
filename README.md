@@ -94,8 +94,9 @@ is not checked, so keep it in an owner-only folder. With a full chain, the finge
 The panel offers Overview (live drop, KPIs and charts), Inventory (campaigns grouped by game,
 filter toggles and expandable drops), Games (priority, exclusions and channel selection),
 Channels (watch controls), Settings and Logs. Search filters the current page. Inventory filters
-and the light/dark theme persist in browser local storage. The layout adapts to a bottom tab bar
-on mobile. Priority and exclusion controls use the matching `GET` and `POST` routes.
+and the light/dark theme persist in browser local storage. The progress chart samples once a minute
+and keeps the last day in `DATA_DIR/dashboard-history.jsonl` (owner-only), so it survives a restart.
+The layout adapts to a bottom tab bar on mobile. Priority and exclusion controls use the matching `GET` and `POST` routes.
 From another terminal, `main.py cli ctl status` queries the running miner through its local
 control channel; `main.py cli ctl help` lists the available remote console commands.
 For scripts, `main.py cli ctl --json <command>` prints the result of a read-only command

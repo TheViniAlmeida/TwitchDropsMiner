@@ -125,6 +125,19 @@ def _host_names(bound: str, origins: tuple[str, ...]) -> set[str]:
     return {name.casefold() for name in names if name}
 
 
+# one sample a minute: a day in memory, and a restart keeps what is younger than a day
+_HISTORY_SAMPLES = 1440
+_HISTORY_KEEP = 86400
+_HISTORY_MAX_BYTES = 8 * 1024 * 1024
+_SAMPLE_KEYS = {"t", "drop_id", "campaign", "progress", "remaining_minutes", "claimed", "total"}
+
+
+def _valid_sample(sample: Any) -> bool:
+    return (isinstance(sample, dict) and set(sample) == _SAMPLE_KEYS
+            and type(sample["t"]) is int and isinstance(sample["progress"], (int, float))
+            and 0 <= sample["progress"] <= 1)
+
+
 @dataclass(frozen=True)
 class DashboardConfig:
     host: str = "127.0.0.1"
@@ -137,6 +150,8 @@ class DashboardConfig:
     origins: tuple[str, ...] = ()
     port_range: tuple[int, int] | None = None
     history_interval: float = 60.0
+    # None keeps the history in memory only
+    history_file: Path | None = None
     tls: bool = False
     tls_cert: Path | None = None
     tls_key: Path | None = None
@@ -270,9 +285,10 @@ class Dashboard:
         self._failures: dict[str, deque[float]] = {}
         self._hosts: set[str] | None = None
         self._pending_auth: dict[str, int] = {}
-        self.history: deque[dict[str, Any]] = deque(maxlen=1440)
+        self.history: deque[dict[str, Any]] = deque(maxlen=_HISTORY_SAMPLES)
         self._history_task: asyncio.Task[None] | None = None
-        self._history_errors: set[str] = set()
+        self._history_errors: set[tuple[str, str]] = set()
+        self._history_lines = 0
         self._loop_handler: Any = None
         self._handler_loop: asyncio.AbstractEventLoop | None = None
         self.app = web.Application(
@@ -354,6 +370,7 @@ class Dashboard:
         try:
             if ssl_context is not None:
                 self._quiet_handshake_errors()
+            self._load_history()
             self._sample_history()
             self._history_task = asyncio.create_task(self._sample_history_loop())
             host = f"[{self.config.host}]" if ":" in self.config.host else self.config.host
@@ -437,10 +454,68 @@ class Dashboard:
                 "claimed": current.get("claimed", 0), "total": current.get("total", 0),
             })
         except Exception as exc:
-            message = self._clean(str(exc))
-            if message not in self._history_errors:
-                self._history_errors.add(message)
-                logger.warning("Dashboard history sampling failed: %s", message)
+            self._history_warning("sampling failed", exc)
+            return
+        self._save_history()
+
+    def _history_warning(self, what: str, exc: BaseException) -> None:
+        message = self._clean(exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc))
+        if (what, message) not in self._history_errors:
+            self._history_errors.add((what, message))
+            logger.warning("Dashboard history %s: %s", what, message)
+
+    def _load_history(self) -> None:
+        """Bring back the last day of samples, so a restart does not empty the charts."""
+        path = self.config.history_file
+        if path is None:
+            return
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self._history_warning("could not be read", exc)
+            return
+        try:
+            with os.fdopen(descriptor, encoding="utf-8", errors="replace") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise OSError("not a regular file")
+                if os.fstat(stream.fileno()).st_size > _HISTORY_MAX_BYTES:
+                    # compaction keeps it far smaller: the next save rewrites it
+                    self._history_lines = 2 * _HISTORY_SAMPLES
+                    raise OSError("file too large, starting over")
+                lines = stream.readlines()
+        except OSError as exc:
+            self._history_warning("could not be read", exc)
+            return
+        now = time.time()
+        for line in lines:
+            try:
+                sample = json.loads(line)
+            except ValueError:
+                continue
+            last = self.history[-1]["t"] if self.history else 0
+            # samples stay in time order; a clock set back must not plot the future
+            if _valid_sample(sample) and max(last + 1, now - _HISTORY_KEEP) <= sample["t"] <= now + 60:
+                self.history.append(sample)
+        self._history_lines = max(self._history_lines, len(lines))
+
+    def _save_history(self) -> None:
+        path = self.config.history_file
+        if path is None:
+            return
+        try:
+            if self._history_lines >= 2 * _HISTORY_SAMPLES or not path.exists():
+                # compact: the file keeps at most twice the samples the panel shows
+                rewrite_private(path, "".join(json.dumps(item) + "\n" for item in self.history))
+                self._history_lines = len(self.history)
+                return
+            descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(self.history[-1]) + "\n")
+            self._history_lines += 1
+        except OSError as exc:
+            self._history_warning("could not be saved", exc)
 
     async def _sample_history_loop(self) -> None:
         while True:
