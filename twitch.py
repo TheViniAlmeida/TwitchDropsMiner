@@ -56,7 +56,7 @@ from constants import (
 
 if TYPE_CHECKING:
     from utils import Game
-    from gui import LoginForm
+    from ui_base import LoginForm, UIManager
     from channel import Stream
     from settings import Settings
     from inventory import TimedDrop
@@ -99,7 +99,7 @@ class _AuthState:
     def invalidate(self, *, delete_cookies: bool = False) -> None:
         self._delattrs("access_token", "user_id")
         self._logged_in.clear()
-        self._twitch.gui.help._invalidate_button.config(state="disabled")
+        self._twitch.gui.set_logged_in(False)
         if delete_cookies:
             session = self._twitch._session
             if session is not None:
@@ -116,7 +116,7 @@ class _AuthState:
             "client_version",
         )
         self._logged_in.clear()
-        self._twitch.gui.help._invalidate_button.config(state="disabled")
+        self._twitch.gui.set_logged_in(False)
 
     async def _oauth_login(self) -> str:
         login_form: LoginForm = self._twitch.gui.login
@@ -426,7 +426,7 @@ class _AuthState:
             # update our cookie and save it
             jar.update_cookies(cookie, client_info.CLIENT_URL)
             jar.save(COOKIES_PATH)
-        self._twitch.gui.help._invalidate_button.config(state="normal")
+        self._twitch.gui.set_logged_in(True)
         self._logged_in.set()
 
 
@@ -449,7 +449,7 @@ class Twitch:
         self._session: aiohttp.ClientSession | None = None
         self._auth_state: _AuthState = _AuthState(self)
         # GUI
-        self.gui = GUIManager(self)
+        self.gui: UIManager = GUIManager(self)
         # Storing and watching channels
         self.channels: OrderedDict[int, Channel] = OrderedDict()
         self.watching_channel: AwaitableValue[Channel] = AwaitableValue()

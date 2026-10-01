@@ -18,7 +18,7 @@ from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType, GQLQuery
 
 if TYPE_CHECKING:
     from twitch import Twitch
-    from gui import ChannelList
+    from ui_base import ChannelList
     from constants import JsonType, GQLPersistedQuery
 
 

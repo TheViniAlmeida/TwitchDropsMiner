@@ -13,7 +13,6 @@ from pathlib import Path
 from collections import abc
 from textwrap import dedent
 from math import log10, ceil
-from dataclasses import dataclass
 from tkinter.font import Font, nametofont
 from functools import partial, cached_property
 from datetime import datetime, timedelta, timezone
@@ -36,6 +35,8 @@ if sys.platform == "darwin":
 from translate import _
 from cache import ImageCache
 from exceptions import MinerException, ExitRequest
+from progress_timer import ProgressTimer
+from ui_base import LoginData
 from utils import resource_path, set_root_icon, webopen, task_wrapper, Game, _T
 from constants import (
     MAX_INT,
@@ -517,13 +518,6 @@ class WebsocketStatus:
         self._topics_var.set('\n'.join(topic_lines))
 
 
-@dataclass
-class LoginData:
-    username: str
-    password: str
-    token: str
-
-
 class LoginForm:
     def __init__(self, manager: GUIManager, master: ttk.Widget):
         self._manager = manager
@@ -635,7 +629,7 @@ class _ProgressVars(TypedDict):
 
 class CampaignProgress:
     BAR_LENGTH = 420
-    ALMOST_DONE_SECONDS = 10
+    ALMOST_DONE_SECONDS = ProgressTimer.ALMOST_DONE_SECONDS
 
     def __init__(self, manager: GUIManager, master: ttk.Widget):
         self._manager = manager
@@ -700,19 +694,16 @@ class CampaignProgress:
             variable=self._vars["drop"]["progress"],
         ).grid(column=0, row=10, columnspan=2)
         self._drop: TimedDrop | None = None
-        self._seconds: int = 0
-        self._timer_task: asyncio.Task[None] | None = None
+        self._timer = ProgressTimer(self._update_time)
         self.display(None)
 
-    def _divmod(self, minutes: int) -> tuple[int, int]:
-        if self._seconds < 60 and minutes > 0:
+    def _divmod(self, minutes: int, seconds: int) -> tuple[int, int]:
+        if seconds < 60 and minutes > 0:
             minutes -= 1
         hours, minutes = divmod(minutes, 60)
         return (hours, minutes)
 
-    def _update_time(self, seconds: int | None = None):
-        if seconds is not None:
-            self._seconds = seconds
+    def _update_time(self, seconds: int):
         drop = self._drop
         if drop is not None:
             drop_minutes = drop.remaining_minutes
@@ -722,48 +713,30 @@ class CampaignProgress:
             campaign_minutes = 0
         drop_vars: _DropVars = self._vars["drop"]
         campaign_vars: _CampaignVars = self._vars["campaign"]
-        dseconds = self._seconds % 60
-        hours, minutes = self._divmod(drop_minutes)
+        dseconds = seconds % 60
+        hours, minutes = self._divmod(drop_minutes, seconds)
         drop_vars["remaining"].set(
             _("gui", "progress", "remaining").format(time=f"{hours:>2}:{minutes:02}:{dseconds:02}")
         )
-        hours, minutes = self._divmod(campaign_minutes)
+        hours, minutes = self._divmod(campaign_minutes, seconds)
         campaign_vars["remaining"].set(
             _("gui", "progress", "remaining").format(time=f"{hours:>2}:{minutes:02}:{dseconds:02}")
         )
 
-    async def _timer_loop(self):
-        self._update_time(60)
-        while self._seconds > 0:
-            await asyncio.sleep(1)
-            self._seconds -= 1
-            self._update_time()
-        self._timer_task = None
-
     def start_timer(self):
-        if self._timer_task is None:
-            if self._drop is None or self._drop.remaining_minutes <= 0:
-                # if we're starting the timer at 0 drop minutes,
-                # all we need is a single instant time update setting seconds to 60,
-                # to avoid substracting a minute from campaign minutes
-                self._update_time(60)
-            else:
-                self._timer_task = asyncio.create_task(self._timer_loop())
+        remaining_minutes = self._drop.remaining_minutes if self._drop is not None else 0
+        self._timer.start_timer(remaining_minutes)
 
     def stop_timer(self):
-        if self._timer_task is not None:
-            self._timer_task.cancel()
-            self._timer_task = None
+        self._timer.stop_timer()
 
     def minute_almost_done(self) -> bool:
-        # already or almost done
-        return self._timer_task is None or self._seconds <= self.ALMOST_DONE_SECONDS
+        return self._timer.minute_almost_done()
 
     def display(self, drop: TimedDrop | None, *, countdown: bool = True, subone: bool = False):
         self._drop = drop
         vars_drop = self._vars["drop"]
         vars_campaign = self._vars["campaign"]
-        self.stop_timer()
         if drop is None:
             # clear the drop display
             vars_drop["rewards"].set("...")
@@ -773,7 +746,7 @@ class CampaignProgress:
             vars_campaign["game"].set("...")
             vars_campaign["progress"].set(0.0)
             vars_campaign["percentage"].set("-%")
-            self._update_time(0)
+            self._timer.display(None)
             return
         vars_drop["rewards"].set(drop.rewards_text())
         vars_drop["progress"].set(drop.progress)
@@ -786,16 +759,15 @@ class CampaignProgress:
             f"{campaign.progress:6.1%} ({campaign.claimed_drops}/{campaign.total_drops})"
         )
         if countdown:
-            # restart our seconds update timer
-            self.start_timer()
+            self._timer.display(drop.remaining_minutes)
         elif subone:
             # display the current remaining time at 0 seconds (after substracting the minute)
             # this is because the watch loop will substract this minute
             # right after the first watch payload returns with a time update
-            self._update_time(0)
+            self._timer.display(drop.remaining_minutes, countdown=False, subone=True)
         else:
             # display full time with no substracting
-            self._update_time(60)
+            self._timer.display(drop.remaining_minutes, countdown=False)
 
 
 class ConsoleOutput:
@@ -2464,6 +2436,9 @@ class GUIManager:
 
     def set_games(self, games: set[Game]) -> None:
         self.settings.set_games(games)
+
+    def set_logged_in(self, logged_in: bool) -> None:
+        self.help._invalidate_button.config(state="normal" if logged_in else "disabled")
 
     def display_drop(
         self, drop: TimedDrop, *, countdown: bool = True, subone: bool = False
